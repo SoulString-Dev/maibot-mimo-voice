@@ -14,6 +14,7 @@ import asyncio
 import base64
 import hashlib
 import json
+import random
 import re
 import shutil
 import subprocess
@@ -273,9 +274,22 @@ class MiMoVoicePlugin(MaiBotPlugin):
         return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()[:16]
 
     def _cache_dir(self) -> Path:
-        directory = self._plugin_dir() / ".cache"
+        directory = self._runtime_cache_root() / "reference-cache"
         directory.mkdir(parents=True, exist_ok=True)
         return directory
+
+    def _runtime_cache_root(self) -> Path:
+        """优先使用宿主提供的 runtime_dir，避免把缓存写进插件源码目录。"""
+        paths = getattr(self.ctx, "paths", None)
+        runtime_dir = getattr(paths, "runtime_dir", None) if paths is not None else None
+        if runtime_dir:
+            try:
+                root = Path(runtime_dir)
+                root.mkdir(parents=True, exist_ok=True)
+                return root
+            except OSError:
+                pass
+        return self._plugin_dir()
 
     def _pick_best_single(self, files: List[Path]) -> Optional[Path]:
         preferred = self.config.voice.preferred_reference_file.strip()
@@ -364,10 +378,11 @@ class MiMoVoicePlugin(MaiBotPlugin):
             return prepared
         return files[0].read_bytes()
 
-    def _ensure_reference_uri(self) -> str:
+    async def _ensure_reference_uri(self) -> str:
         if self._reference_uri:
             return self._reference_uri
-        payload = self._reference_bytes()
+        # ffmpeg 预处理是同步阻塞调用，放到线程里跑，避免卡住 Runner 事件循环。
+        payload = await asyncio.to_thread(self._reference_bytes)
         if not payload:
             raise ValueError(f"未找到参考音频：{self._resolve_path(self.config.voice.reference_path)}")
         limit = int(self.config.voice.max_reference_base64_mb * 1024 * 1024)
@@ -395,7 +410,7 @@ class MiMoVoicePlugin(MaiBotPlugin):
         api_key = self.config.mimo.api_key.strip()
         if not api_key:
             raise RuntimeError("未配置 MiMo api_key")
-        reference = self._ensure_reference_uri()
+        reference = await self._ensure_reference_uri()
         body = {
             "model": self.config.mimo.model,
             "messages": [{"role": "assistant", "content": text}],
@@ -577,7 +592,9 @@ class MiMoVoicePlugin(MaiBotPlugin):
         description="按配置把纯文本回复原位转换为语音，失败时按配置回退文字",
         mode=HookMode.BLOCKING,
         order=HookOrder.LATE,
-        timeout_ms=300000,
+        # 默认配置（timeout 20s、retry 0）下 130s 已很宽松；如果调大 general.timeout 或
+        # retry_attempts，整条出站链路可能触及这个上限，此时宿主会放弃本 hook、按文字原样发送。
+        timeout_ms=130000,
         error_policy=ErrorPolicy.SKIP,
     )
     async def convert_outbound_text(self, message: Optional[Dict[str, Any]] = None, **kwargs: Any) -> Optional[Dict[str, Any]]:
@@ -683,7 +700,7 @@ class MiMoVoicePlugin(MaiBotPlugin):
         "mimo_voice_text_reply",
         description="让当前这一轮回复保留文字，不要转换成语音。适合代码、表格、网址或较长的说明。",
         activation_type=ActivationType.ALWAYS,
-        parameters_schema={"type": "object", "properties": {}},
+        parameters={"type": "object", "properties": {}},
     )
     async def allow_text_reply(self, **kwargs: Any) -> Dict[str, Any]:
         stream_id = str(kwargs.get("stream_id") or kwargs.get("session_id") or "").strip()

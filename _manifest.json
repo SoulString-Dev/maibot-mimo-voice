@@ -4,20 +4,38 @@
   "version": "0.2.0",
   "name": "MiMo 语音回复",
   "description": "用 MiMo 音色克隆把麦麦的纯文本回复按比例替换为语音：固定参考音频、低温度采样、短句优先、超时自动回退文字。",
-  "author": { "name": "SoulString", "url": "https://github.com/SoulString-Dev" },
+  "author": {
+    "name": "SoulString",
+    "url": "https://github.com/SoulString-Dev"
+  },
   "license": "MIT",
-  "plugin_type": "extension",
+  "plugin_type": "media",
   "urls": {
     "repository": "https://github.com/SoulString-Dev/maibot-mimo-voice",
     "homepage": "https://github.com/SoulString-Dev/maibot-mimo-voice",
     "documentation": "https://github.com/SoulString-Dev/maibot-mimo-voice/blob/main/README.md",
     "issues": "https://github.com/SoulString-Dev/maibot-mimo-voice/issues"
   },
-  "host_application": { "min_version": "1.3.0", "max_version": "1.3.99" },
-  "sdk": { "min_version": "2.12.0", "max_version": "2.99.99" },
+  "host_application": {
+    "min_version": "1.3.0",
+    "max_version": "1.3.99"
+  },
+  "sdk": {
+    "min_version": "2.12.0",
+    "max_version": "2.99.99"
+  },
   "dependencies": [
-    { "type": "python_package", "name": "aiohttp", "version_spec": ">=3.0" }
+    {
+      "type": "python_package",
+      "name": "aiohttp",
+      "version_spec": ">=3.0"
+    }
   ],
   "capabilities": [],
-  "i18n": { "default_locale": "zh-CN", "supported_locales": ["zh-CN"] }
+  "i18n": {
+    "default_locale": "zh-CN",
+    "supported_locales": [
+      "zh-CN"
+    ]
+  }
 }
