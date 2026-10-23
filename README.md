@@ -1,63 +1,90 @@
-# ling-tts-bot
+# maibot-mimo-voice
 
-基于 Xiaomi MiMo v2.5 VoiceClone 的 MaiBot 语音回复插件。
+把麦麦（MaiBot）的**纯文本回复**按策略替换成 MiMo 语音条，音色来自你自己提供的参考音频。
 
-## 功能
+思路参考 [Ling-LA/ling-tts-bot](https://github.com/Ling-LA/ling-tts-bot)（MIT），本仓库做了取舍与重写，主要差异：
 
-- 默认自动选择目录中静音少、长度合适的一段，裁掉首尾静音后生成无损 WAV，减少多段语气混杂和重复有损压缩对音色的影响。
-- 可切换 `balanced`（每个文件取短片段）或 `full_merge`（完整合并，兼容旧行为）参考策略。
-- 支持 `llm_trigger`、`random`、`voice_only` 三种触发模式，默认 `llm_trigger` 语音优先模式。
-- 语音优先模式下，普通回复默认转换为语音；LLM 判断代码、网址、表格等内容更适合文字时，可让当前回复会话内的多段消息保留文字和引用关系。
-- 配置热重载后立即切换模式、API 参数和参考音频。
-- 在出站阶段把纯文本原位替换为语音，避免同一回复同时发送文字和语音。
-- QQ 不支持“引用消息 + 语音”组合；转换语音时会自动移除引用段，确保语音实际送达。
+| 改动 | 原因 |
+|---|---|
+| 默认 `random` + `probability = 0.05` + 短句门槛 60 字 | 全量转语音太激进；语音集中在短句上更像真人插话 |
+| 支持群聊/私聊 `all / whitelist / blacklist` | 灰度上线时可以先只在指定群或私聊里出声 |
+| 参考音频支持固定单文件，也保留 `best_single / balanced / full_merge` | 单文件不需要 ffmpeg；需要自动挑选/拼接时仍可用原策略 |
+| `temperature` 默认 0.15 | 实测同一句三次的中位音高漂移从 ~11Hz 降到 ~2Hz |
+| 合成超时默认 20 秒，超时回退文字 | 上游 TTS p95 约 48 秒，不能把回复拖到一分钟 |
+| 合成并发默认 1 路 | 3 路并发会把单路延迟推到 50–96 秒 |
+| 不做音频缓存 | LLM 生成的回复几乎不会逐字重复，缓存命中率极低 |
 
-## 环境要求
+## 效果与取舍
 
-- MaiBot 1.x
-- MaiBot Plugin SDK 2.x
-- Python 3.10 或更高版本
-- FFmpeg（需要同时提供 `ffmpeg` 和 `ffprobe`）
-- Xiaomi MiMo API Key
+- 语音条**替换**文字：命中的那条回复只发语音，不再发文字。
+- 超时或失败默认**回退发文字**（`delivery.fallback_to_text = true`），保证消息不丢。
+- QQ 不支持「引用 + 语音」组合，转语音时会自动去掉引用段。
+- `llm_trigger` 模式下模型可以先调 `mimo_voice_text_reply` 把这一轮改回文字（代码、表格、链接等）。
 
 ## 安装
 
-在 MaiBot 根目录执行：
+1. 把仓库放进麦麦的插件目录（如 `data/MaiBot/plugins/maibot-mimo-voice`）。
+2. 复制 `config.example.toml` 为 `config.toml`，填好 `[mimo] api_key`。
+3. 准备参考音频放到插件目录（见下一节），默认文件名 `reference.wav`。
+4. 生效方式：重启核心，或者直接改插件目录里的文件——麦麦的文件监视会自动重载扩展插件。
+
+依赖：`aiohttp`（麦麦插件运行时已自带）。
+
+## 准备参考音频
+
+推荐在**宿主机**上做，不用进容器：
 
 ```bash
-git clone https://github.com/Ling-LA/ling-tts-bot.git plugins/ling_tts-bot
+# 1) 准备一段 5–20 秒、安静环境录的干净人声（或从喜欢的主播/TTS 音色里截一段）
+# 2) 按需做音高/语速调整，例如"升 12% / 提速 8%"：
+ffmpeg -i source.wav -af "aresample=24000,asetrate=24000*1.12,aresample=24000,atempo=1.08" -ac 1 -ar 24000 reference.wav
 ```
 
-也可以下载仓库源码并解压到 `MaiBot/plugins/ling_tts-bot`。首次加载后，MaiBot 会根据配置模型生成 `config.toml`；也可复制 `config.example.toml` 作为配置起点。
+> 实测：参考音频升调后，克隆输出会跟着抬高（1.06× 参考 → 输出约 1.05×），
+> 所以"预设音色 → 升调提速 → 当参考"只需做一次。
 
-## 配置
+`tools/build_reference.sh` 是上面命令的封装。
 
-1. 确保系统已安装 FFmpeg，或在 `voice.ffmpeg_path` 中填写可执行文件路径。
-2. 在 `mimo.api_key` 中填写 MiMo API Key。
-3. 在 `voice.voice_dir` 中填写参考音频目录。
-4. 按需设置 `trigger.mode`，保存配置即可热重载。
+## 配置说明
 
-触发模式：
+| 配置 | 默认 | 说明 |
+|---|---|---|
+| `trigger.mode` | `random` | `random` 按概率；`llm_trigger` 语音优先、模型可改文字；`voice_only` 全部转语音 |
+| `trigger.probability` | `0.05` | random 模式下每条回复转语音的概率 |
+| `trigger.short_reply_max_chars` | `60` | 超过该字数不转语音（0 = 不限制） |
+| `trigger.overflow_policy` | `text` | 超过 `general.max_text_length` 时保留文字；`truncate` 为截断后合成 |
+| `filters.group_mode` | `all` | 群聊放行方式：`all` / `whitelist` / `blacklist` |
+| `filters.private_mode` | `all` | 私聊放行方式：`all` / `whitelist` / `blacklist` |
+| `filters.group_ids` | `[]` | 群号列表（配合 `group_mode`） |
+| `filters.private_user_ids` | `[]` | 私聊对方 QQ 号列表（配合 `private_mode`） |
+| `general.timeout` | `20.0` | 单次合成超时（秒） |
+| `mimo.temperature` | `0.15` | 越低越稳；0.7 以上能听出"换人" |
+| `mimo.max_concurrent` | `1` | 同时合成路数，建议保持 1 |
+| `delivery.fallback_to_text` | `true` | 失败时发文字还是拦截 |
 
-- `llm_trigger`：默认语音优先；LLM 判断代码、网址、表格等内容更适合文字时，当前回复会话改用文字。
-- `random`：按 `trigger.probability` 概率把回复转换为语音。
-- `voice_only`：所有纯文本回复都转换为语音。
+群聊和私聊互不影响，例如"群聊只放行一个群、私聊全放行"：
 
-参考音频策略：
+```toml
+[filters]
+group_mode = "whitelist"
+group_ids = ["589957759"]
+private_mode = "all"
+```
 
-- `best_single`：自动挑选静音少、长度合适的一段并生成无损 WAV，默认且推荐。
-- `balanced`：从目录内每个文件截取短片段并合并。
-- `full_merge`：完整合并全部音频，兼容旧行为。
+`group_mode` 与 `private_mode` 都不是 `all` 时，插件会记录入站消息的群号/对方 QQ 号
+（`chat.receive.before_process`），出站时按名单判断；两者都是 `all` 时不记录，零额外开销。
+拿不到对方身份时（映射过期等）一律保持文字，不误放行。
 
-参考音频较多时建议保持 `voice.reference_strategy = "best_single"`。如需手动固定最接近目标音色的一段，可在 `voice.preferred_reference_file` 填写文件名；若必须让目录内每个文件都参与，则使用 `balanced`。
+## 实测数据（2026-10-23，MiMo 官方接口）
 
+- 克隆耗时：20 次顺序请求，p50 **5.1s**、p90 28.4s、max 47.6s，全部成功。
+- 音色稳定性：`temperature=0.15` + 固定参考，同句多次中位音高差约 2Hz；默认采样下可达 11Hz。
+- 并发：2 路正常；3 路开始排队；5 路直接 429。
 
-已有 `config.toml` 不必重建；未配置参考策略时默认使用 `best_single`，未配置 `trigger.mode` 时默认使用 `llm_trigger`。
+## 隐私
 
-## 使用示例
+参考音频只保存在本地插件目录，除了随请求发给你配置的 TTS 服务外，不会上传到任何地方。
 
-可使用 `/tts 你好呀` 手动验证合成与发送链路。
+## License
 
-## 许可证
-
-[MIT](LICENSE)
+MIT。上游 `ling-tts-bot` 版权所有 (c) 2026 Ling-LA，本项目保留其许可声明。

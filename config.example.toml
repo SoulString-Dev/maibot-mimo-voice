@@ -1,50 +1,78 @@
-# MiMo v2.5 语音克隆插件配置模板
+# maibot-mimo-voice 配置模板
+# 复制为 config.toml 后按需修改；所有项都有默认值，最小可用配置只需要 [mimo] 里的 api_key。
 
 [plugin]
 enabled = true
-config_version = "2.3.0"
+config_version = "0.2.0"
 
 [general]
+# 单条语音能承载的最大文字长度；超长按 [trigger] overflow_policy 处理。
 max_text_length = 300
-timeout = 120
+# 单次合成超时（秒）。实测 p90 约 28 秒，20 秒是"宁可发文字也不卡住"的折中。
+timeout = 20.0
 
 [trigger]
-# 三选一：
-# llm_trigger：默认优先发语音，LLM 判断内容更适合文字时改用文字（默认）
-# random：按 probability 随机把整条回复转换成语音
-# voice_only：所有纯文本回复都转换成语音
-mode = "llm_trigger"
-probability = 0.3
+# random：按 probability 随机把整条回复转成语音（默认，约 5%）
+# llm_trigger：语音优先，LLM 判断内容更适合文字时改用文字
+# voice_only：所有纯文本回复都转成语音
+mode = "random"
+probability = 0.05
 random_decision_ttl = 8.0
-# LLM 选择文字后，当前回复会话保持文字的有效时间；窗口内支持多段文字。
 text_override_ttl = 15.0
+# 短句门槛：超过该字数的回复不转语音（0 = 不限制）。语音只留给短句。
+short_reply_max_chars = 60
+# 超过 general.max_text_length 时：text=保留文字（默认）；truncate=截断后合成
+overflow_policy = "text"
+
+[filters]
+# 群聊、私聊各自独立判断，都可以选 all / whitelist / blacklist。
+# all：全部放行（默认）
+# whitelist：只有 group_ids / private_user_ids 里的对象转语音
+# blacklist：group_ids / private_user_ids 里的对象保持文字，其余转语音
+group_mode = "all"
+private_mode = "all"
+# 群号列表（配合 group_mode 使用）
+group_ids = []
+# 私聊对方的 QQ 号列表（配合 private_mode 使用）
+private_user_ids = []
 
 [voice]
-# 支持：aac/flac/m4a/mp3/mpeg/ogg/opus/wav/wma
-# 参考音频文件存放目录
-voice_dir = 'D:\AAA\AAA'
-clone_prompt = "用原本的音色和语气说话，保持自然流畅，不要改变声线和说话习惯"
-# 留空时从 PATH 自动查找 ffmpeg。
-ffmpeg_path = ""
-# 三选一：
-# best_single：自动选择静音少、长度合适的一段，裁掉首尾静音并生成无损 WAV（默认，音色最稳定）
-# balanced：目录内每个文件截取短片段后合并为无损 WAV
-# full_merge：完整合并全部文件并编码为 MP3（兼容旧行为，不建议用于大量音频）
-reference_strategy = "best_single"
-# best_single 模式可指定文件名；留空时自动选择。
+# 固定参考音频：相对路径按插件目录解析，也可写绝对路径。
+# 建议 5–20 秒、干净人声、24kHz 单声道 WAV，已按需做音高/语速调整（见 tools/build_reference.sh）。
+reference_path = "reference.wav"
+# 参考音频目录：reference_strategy 不是 single_file 时，从这里挑选/拼接素材。
+voice_dir = "voices"
+# single_file：直接使用 reference_path（默认，不需要 ffmpeg）
+# best_single：自动挑选静音少的一段并裁掉首尾静音（需要 ffmpeg）
+# balanced：每个文件截取一段后合并（需要 ffmpeg）
+# full_merge：完整合并全部文件（需要 ffmpeg）
+reference_strategy = "single_file"
 preferred_reference_file = ""
 max_clip_duration = 15.0
 balanced_clip_duration = 3.0
 silence_threshold_db = -45.0
 sample_rate = 24000
-# 仅 full_merge 模式使用。
 reference_bitrate_kbps = 64
-# MiMo 要求参考音频 Base64 不超过 10 MB，预留少量余量。
+# 参考音频 Base64 上限，MiMo 官方为 10MB，留一点余量。
 max_reference_base64_mb = 9.5
+# ffmpeg 可执行文件路径，留空则从 PATH 查找。
+ffmpeg_path = ""
+clone_prompt = "用原本的音色和语气说话，保持自然流畅，不要改变声线和说话习惯"
 
 [mimo]
-api_key = "你的_MiMo_API_Key"
-# 可以填写基础地址，也可以直接填写以 /chat/completions 结尾的完整地址。
+api_key = "sk-你的_MiMo_API_Key"
+# 可填基础地址，也可直接填以 /chat/completions 结尾的完整地址。
 api_base_url = "https://api.xiaomimimo.com/v1"
 model = "mimo-v2.5-tts-voiceclone"
 audio_format = "mp3"
+# 采样温度：0.15 是实测最稳的值；调高会更"生动"但音色漂移明显。
+temperature = 0.15
+top_p = 1.0
+# 同时在飞的合成请求数；实测 3 路以上会明显排队，建议 1。
+max_concurrent = 1
+# 失败后的额外重试次数；默认不重试，避免把 20 秒拖成 40 秒。
+retry_attempts = 0
+
+[delivery]
+# 合成失败/超时：true 回退发文字（推荐）；false 直接拦截这条回复。
+fallback_to_text = true
