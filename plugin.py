@@ -170,6 +170,11 @@ class MiMoVoiceConfig(PluginConfigBase):
     delivery: DeliveryConfig = Field(default_factory=DeliveryConfig)
 
 
+def _concat_path(path: Path) -> str:
+    """ffmpeg concat demuxer 的 file 行：单引号内的单引号需要转义，否则带引号的文件名会解析错。"""
+    return path.as_posix().replace("'", r"'\''")
+
+
 class MiMoVoicePlugin(MaiBotPlugin):
     """把纯文本回复替换为 MiMo 语音条。"""
 
@@ -343,12 +348,12 @@ class MiMoVoicePlugin(MaiBotPlugin):
                 if not pieces:
                     return None
                 listing = workdir / "parts.txt"
-                listing.write_text("".join(f"file '{piece.as_posix()}'\n" for piece in pieces), encoding="utf-8")
+                listing.write_text("".join(f"file '{_concat_path(piece)}'\n" for piece in pieces), encoding="utf-8")
                 command = [ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-f", "concat", "-safe", "0",
                            "-i", str(listing), "-ac", "1", "-ar", str(rate), "-c:a", "pcm_s16le", str(output)]
             else:  # full_merge
                 listing = workdir / "merge.txt"
-                listing.write_text("".join(f"file '{item.as_posix()}'\n" for item in files), encoding="utf-8")
+                listing.write_text("".join(f"file '{_concat_path(item)}'\n" for item in files), encoding="utf-8")
                 merged = workdir / f"reference-{self._reference_signature or 'x'}.mp3"
                 command = [ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-f", "concat", "-safe", "0",
                            "-i", str(listing), "-ac", "1", "-ar", str(rate),
