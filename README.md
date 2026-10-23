@@ -19,7 +19,7 @@
 - 语音条**替换**文字：命中的那条回复只发语音，不再发文字。
 - 超时或失败默认**回退发文字**（`delivery.fallback_to_text = true`），保证消息不丢。
 - QQ 不支持「引用 + 语音」组合，转语音时会自动去掉引用段。
-- `llm_trigger` 模式下模型可以先调 `mimo_voice_text_reply` 把这一轮改回文字（代码、表格、链接等）。
+- `llm_trigger` 模式下模型可以先调 `mimo_voice_text_reply` 把这一轮改回文字（代码、表格、链接等）；该模式只靠工具描述引导，不改写 planner 提示词。
 
 ## 安装
 

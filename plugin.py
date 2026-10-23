@@ -669,23 +669,10 @@ class MiMoVoicePlugin(MaiBotPlugin):
             ]
             kwargs["tool_definitions"] = tools
             return {"action": "continue", "modified_kwargs": kwargs}
-        messages = kwargs.get("messages")
-        if isinstance(messages, list) and self.config.trigger.mode == "llm_trigger":
-            note = (
-                "\n\n【语音回复】你的普通回复会被转换成语音发出去。"
-                "只有当你判断当前内容（代码、表格、链接、长文本等）更适合用文字表达时，"
-                "才调用 mimo_voice_text_reply 让这一轮保留文字。"
-            )
-            injected = False
-            for item in reversed(messages):
-                if isinstance(item, dict) and item.get("role") == "system":
-                    item["content"] = str(item.get("content") or "") + note
-                    injected = True
-                    break
-            if not injected:
-                messages.insert(0, {"role": "system", "content": note.strip()})
-            kwargs["messages"] = messages
-        return {"action": "continue", "modified_kwargs": kwargs}
+        # llm_trigger 模式下模型只依赖 mimo_voice_text_reply 的工具描述做判断：
+        # planner 请求体里没有 messages 键（见 chat_loop_service 的 hook 参数表），
+        # 之前塞进 kwargs["messages"] 的说明会被宿主丢弃，这里不再做无效注入。
+        return None
 
     @staticmethod
     def _tool_definition_name(definition: Any) -> str:
