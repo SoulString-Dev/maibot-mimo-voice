@@ -525,11 +525,12 @@ class MiMoVoicePlugin(MaiBotPlugin):
         if not isinstance(raw, list) or not raw:
             return None
         segments = [item for item in raw if isinstance(item, dict)]
-        if len(segments) != 1:
+        # 引用回复会带一个 reply 段，不能因为它就把整条消息当成“非纯文本”跳过：
+        # 转语音时引用段本来就会被移除。这里只接受 text(+reply) 组合，且必须恰好一个 text。
+        types = [str(segment.get("type") or "") for segment in segments]
+        if any(kind not in {"text", "reply"} for kind in types) or types.count("text") != 1:
             return None
-        segment = segments[0]
-        if segment.get("type") != "text":
-            return None
+        segment = segments[types.index("text")]
         data = segment.get("data")
         text = data if isinstance(data, str) else (data or {}).get("text") if isinstance(data, dict) else None
         if not isinstance(text, str):
