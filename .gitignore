@@ -5,3 +5,4 @@ config.toml
 config_back/
 reference.wav
 reference.mp3
+.cache/

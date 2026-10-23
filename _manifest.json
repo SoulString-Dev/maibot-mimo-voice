@@ -6,6 +6,7 @@
   "description": "用 MiMo 音色克隆把麦麦的纯文本回复按比例替换为语音：固定参考音频、低温度采样、短句优先、超时自动回退文字。",
   "author": { "name": "SoulString", "url": "https://github.com/SoulString-Dev" },
   "license": "MIT",
+  "plugin_type": "extension",
   "urls": {
     "repository": "https://github.com/SoulString-Dev/maibot-mimo-voice",
     "homepage": "https://github.com/SoulString-Dev/maibot-mimo-voice",
