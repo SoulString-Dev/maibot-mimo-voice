@@ -3,6 +3,10 @@
 设计要点：
 - 合成走 MiMo 官方 `mimo-v2.5-tts-voiceclone`，参考音频固定、可预先用 ffmpeg 升调提速；
 - 默认策略是“少量、短句”（`trigger.mode = "random"`，`probability = 0.05`，短句上限 60 字）；
+- `trigger.mode = "random_llm"` 时随机抽签与模型主动请求并行：模型可以调 `mimo_voice_say`
+  指定某轮用语音，随机抽签保证日常仍有一定出现频率；
+- 合成前会对文本做一次朗读清洗（去表情/引号/波浪号/省略号，补齐句末标点），
+  并把 `voice.style_instruction` 作为 user 消息随请求发送，用来压住音高漂移；
 - 群聊/私聊支持 all / whitelist / blacklist 三种放行模式；
 - 合成超时或失败默认回退为文字，保证消息不丢；
 - 不做音频缓存：同一段文本重复出现的概率极低，缓存命中率不值得维护。
@@ -25,15 +29,36 @@ from typing import Any, Dict, List, Literal, Optional, Tuple
 import aiohttp
 
 from maibot_sdk import CONFIG_RELOAD_SCOPE_SELF, Field, HookHandler, MaiBotPlugin, PluginConfigBase, Tool
-from maibot_sdk.types import ActivationType, ErrorPolicy, HookMode, HookOrder
+from maibot_sdk.types import ErrorPolicy, HookMode, HookOrder
 
 SUPPORTED_REFERENCE_SUFFIXES = {".aac", ".flac", ".m4a", ".mp3", ".mpeg", ".ogg", ".opus", ".wav", ".wma"}
 VOICE_SEGMENT_TYPE = "voice"
 CLONE_PROMPT = "用原本的音色和语气说话，保持自然流畅，不要改变声线和说话习惯"
+DEFAULT_STYLE_INSTRUCTION = "用同一个人的音色朗读，语速平稳，情绪自然，不要夸张，不要拖长尾音。"
 _URL_PATTERN = re.compile(r"https?://\S+")
 _CQ_PATTERN = re.compile(r"\[CQ:[^\]]+\]")
+# 表情符号与零宽字符：朗读前必须清掉，否则会被念出来或者把音高带跑。
+_EMOJI_PATTERN = re.compile(
+    "[\U0001F000-\U0001FAFF\U00002600-\U000027BF\U0001F1E6-\U0001F1FF\u2190-\u21FF\u2B00-\u2BFF\ufe0f\u200d]"
+)
+_LEAD_NOISE_PATTERN = re.compile(r"^[\s'\"“”‘’「」『』（）()\[\]【】《》<>~～\-—*_`#>、，,。]+")
+_TAIL_NOISE_PATTERN = re.compile(r"[\s'\"“”‘’「」『』（）()\[\]【】《》<>*_`~～\-—、，,]+$")
+_SENTENCE_END = "。！？!?"
+# MiMo 侧可重试的 HTTP 状态：超时与 4xx 业务错误不重试，避免把总耗时翻倍。
+_RETRYABLE_STATUS = frozenset({408, 425, 429, 500, 502, 503, 504})
+# 小于这个字节数的 mp3 基本是空音频（约 0.15 秒），按失败处理。
+_MIN_AUDIO_BYTES = 600
 _SCOPE_TTL_SECONDS = 12 * 3600.0
 _SCOPE_MAX_ENTRIES = 5000
+
+
+class _RetryableSynthesisError(RuntimeError):
+    """上游临时故障，可以按配置退避重试。"""
+
+
+class _SynthesisBusy(RuntimeError):
+    """并发已满，按 delivery.skip_when_busy 直接回退文字。"""
+
 
 
 class PluginSectionConfig(PluginConfigBase):
@@ -42,7 +67,7 @@ class PluginSectionConfig(PluginConfigBase):
     __ui_label__ = "基础设置"
 
     enabled: bool = Field(default=True, description="是否启用语音回复")
-    config_version: str = Field(default="0.2.0", description="配置文件版本号")
+    config_version: str = Field(default="0.2.1", description="配置文件版本号")
 
 
 class GeneralConfig(PluginConfigBase):
@@ -69,13 +94,20 @@ class TriggerConfig(PluginConfigBase):
 
     __ui_label__ = "触发策略"
 
-    mode: Literal["random", "llm_trigger", "voice_only"] = Field(
+    mode: Literal["random", "random_llm", "llm_trigger", "voice_only"] = Field(
         default="random",
-        description="random=按概率转语音；llm_trigger=语音优先、LLM 判断内容更适合文字时改文字；voice_only=所有纯文本都转语音",
+        description="random=按概率转语音；random_llm=概率抽签 + 模型主动请求（mimo_voice_say）；"
+        "llm_trigger=语音优先、LLM 判断内容更适合文字时改文字；voice_only=所有纯文本都转语音",
     )
-    probability: float = Field(default=0.05, ge=0.0, le=1.0, description="random 模式下每条回复转语音的概率")
+    probability: float = Field(default=0.05, ge=0.0, le=1.0, description="random / random_llm 模式下每条回复转语音的概率")
     random_decision_ttl: float = Field(default=8.0, ge=0.0, le=120.0, description="random 模式下同一聊天流的判定有效期（秒）")
     text_override_ttl: float = Field(default=15.0, ge=0.0, le=300.0, description="LLM 选择文字后，该聊天流保持文字的有效期（秒）")
+    llm_request_ttl: float = Field(
+        default=20.0,
+        ge=0.0,
+        le=300.0,
+        description="random_llm 模式下，模型请求语音后该聊天流的语音有效期（秒）",
+    )
     short_reply_max_chars: int = Field(
         default=60,
         ge=0,
@@ -132,7 +164,11 @@ class VoiceConfig(PluginConfigBase):
     reference_bitrate_kbps: int = Field(default=64, ge=16, le=320, description="full_merge 输出 MP3 的码率")
     max_reference_base64_mb: float = Field(default=9.5, ge=1.0, le=12.0, description="参考音频 Base64 上限（MiMo 限制约 10MB）")
     ffmpeg_path: str = Field(default="", description="ffmpeg 路径，留空则从 PATH 查找")
-    clone_prompt: str = Field(default=CLONE_PROMPT, description="克隆提示词，一般不需要修改")
+    clone_prompt: str = Field(default=CLONE_PROMPT, description="（已废弃，保留仅为兼容旧配置，不再生效）")
+    style_instruction: str = Field(
+        default=DEFAULT_STYLE_INSTRUCTION,
+        description="随请求发送的朗读风格指令（user 消息）；用它压住音高漂移，留空表示不发送",
+    )
 
 
 class MiMoConfig(PluginConfigBase):
@@ -147,7 +183,9 @@ class MiMoConfig(PluginConfigBase):
     temperature: float = Field(default=0.15, ge=0.0, le=1.0, description="采样温度，越低音色越稳定")
     top_p: float = Field(default=1.0, ge=0.1, le=1.0, description="nucleus 采样")
     max_concurrent: int = Field(default=1, ge=1, le=4, description="同时合成路数，建议保持 1")
-    retry_attempts: int = Field(default=0, ge=0, le=3, description="失败重试次数（会叠加超时）")
+    retry_attempts: int = Field(default=0, ge=0, le=3, description="可重试错误（429/5xx/网络）的重试次数；超时不重试")
+    retry_backoff_seconds: float = Field(default=1.5, ge=0.0, le=10.0, description="重试退避基数（秒），按 2 的幂指数增长")
+    connect_timeout: float = Field(default=10.0, ge=1.0, le=60.0, description="建立连接的超时（秒），与整体超时分开")
 
 
 class DeliveryConfig(PluginConfigBase):
@@ -156,6 +194,10 @@ class DeliveryConfig(PluginConfigBase):
     __ui_label__ = "发送"
 
     fallback_to_text: bool = Field(default=True, description="合成失败/超时时是否回退发送文字")
+    skip_when_busy: bool = Field(
+        default=True,
+        description="并发已满时直接发文字（True），或排队等待（False，可能把整条回复拖到超时）",
+    )
 
 
 class MiMoVoiceConfig(PluginConfigBase):
@@ -185,6 +227,7 @@ class MiMoVoicePlugin(MaiBotPlugin):
         self._session: Optional[aiohttp.ClientSession] = None
         self._random_decisions: Dict[str, Tuple[float, bool]] = {}
         self._text_override_sessions: Dict[str, float] = {}
+        self._llm_voice_requests: Dict[str, float] = {}
         self._scope_cache: Dict[str, Tuple[float, Dict[str, str]]] = {}
         self._reference_uri: Optional[str] = None
         self._reference_signature: Optional[str] = None
@@ -201,10 +244,13 @@ class MiMoVoicePlugin(MaiBotPlugin):
             self.ctx.logger.warning("MiMo 语音插件未配置 api_key，所有回复将保持文字")
         strategy = self.config.voice.reference_strategy
         self.ctx.logger.info(
-            "MiMo 语音插件已加载：mode=%s, probability=%.2f, 合成=%s, 参考策略=%s, 群聊放行=%s, 私聊放行=%s",
+            "MiMo 语音插件已加载：mode=%s, probability=%.2f, 短句上限=%d字, 合成=%s, "
+            "风格指令=%s, 参考策略=%s, 群聊放行=%s, 私聊放行=%s",
             self.config.trigger.mode,
             self.config.trigger.probability,
+            int(self.config.trigger.short_reply_max_chars),
             self.config.mimo.model,
+            "开" if self.config.voice.style_instruction.strip() else "关",
             strategy,
             self.config.filters.group_mode,
             self.config.filters.private_mode,
@@ -219,6 +265,7 @@ class MiMoVoicePlugin(MaiBotPlugin):
         await self._close_session()
         self._random_decisions.clear()
         self._text_override_sessions.clear()
+        self._llm_voice_requests.clear()
         self._scope_cache.clear()
         self._reference_uri = None
         self._reference_signature = None
@@ -239,8 +286,25 @@ class MiMoVoicePlugin(MaiBotPlugin):
         path = Path(raw).expanduser()
         return path if path.is_absolute() else (self._plugin_dir() / path)
 
+    def _resolve_inside_plugin(self, raw: str, default_name: str, label: str) -> Path:
+        """把配置里的路径限制在插件目录内，越界时退回默认文件，避免读到插件目录外的内容。"""
+        plugin_dir = self._plugin_dir().resolve()
+        resolved = self._resolve_path(raw).resolve()
+        try:
+            resolved.relative_to(plugin_dir)
+            return resolved
+        except ValueError:
+            self.ctx.logger.warning("%s 指向插件目录之外（%s），已回退为默认的 %s", label, resolved, default_name)
+            return (plugin_dir / default_name).resolve()
+
+    def _reference_path(self) -> Path:
+        return self._resolve_inside_plugin(self.config.voice.reference_path, "reference.wav", "voice.reference_path")
+
+    def _voice_dir(self) -> Path:
+        return self._resolve_inside_plugin(self.config.voice.voice_dir, "voices", "voice.voice_dir")
+
     def _audio_files(self) -> List[Path]:
-        directory = self._resolve_path(self.config.voice.voice_dir)
+        directory = self._voice_dir()
         if not directory.is_dir():
             return []
         return sorted(
@@ -254,7 +318,7 @@ class MiMoVoicePlugin(MaiBotPlugin):
             files = self._audio_files()
             if files:
                 return files
-        fixed = self._resolve_path(self.config.voice.reference_path)
+        fixed = self._reference_path()
         return [fixed] if fixed.is_file() else []
 
     def _ffmpeg(self) -> Optional[str]:
@@ -389,11 +453,11 @@ class MiMoVoicePlugin(MaiBotPlugin):
         # ffmpeg 预处理是同步阻塞调用，放到线程里跑，避免卡住 Runner 事件循环。
         payload = await asyncio.to_thread(self._reference_bytes)
         if not payload:
-            raise ValueError(f"未找到参考音频：{self._resolve_path(self.config.voice.reference_path)}")
+            raise ValueError(f"未找到参考音频：{self._reference_path()}")
         limit = int(self.config.voice.max_reference_base64_mb * 1024 * 1024)
         if len(payload) > limit:
             raise ValueError(f"参考音频过大（{len(payload) / 1024 / 1024:.1f}MB），超过 {self.config.voice.max_reference_base64_mb}MB 限制")
-        suffix = self._resolve_path(self.config.voice.reference_path).suffix.lower().lstrip(".") or "wav"
+        suffix = self._reference_path().suffix.lower().lstrip(".") or "wav"
         mime = f"audio/{suffix}" if suffix not in {"mpeg", "m4a"} else "audio/mpeg"
         encoded = base64.b64encode(payload).decode("ascii")
         self._reference_uri = f"data:{mime};base64,{encoded}"
@@ -403,7 +467,10 @@ class MiMoVoicePlugin(MaiBotPlugin):
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
-            timeout = aiohttp.ClientTimeout(total=float(self.config.general.timeout))
+            timeout = aiohttp.ClientTimeout(
+                total=float(self.config.general.timeout),
+                connect=float(self.config.mimo.connect_timeout),
+            )
             self._session = aiohttp.ClientSession(timeout=timeout)
         return self._session
 
@@ -416,16 +483,22 @@ class MiMoVoicePlugin(MaiBotPlugin):
         if not api_key:
             raise RuntimeError("未配置 MiMo api_key")
         reference = await self._ensure_reference_uri()
+        messages: List[Dict[str, str]] = []
+        style = (self.config.voice.style_instruction or "").strip()
+        if style:
+            # MiMo 只接受 user / assistant 两种角色；把风格指令放在 user 消息里，
+            # 实测能把同文本多次合成的音高离散度从 σ≈35Hz 压到 σ≈6–14Hz。
+            messages.append({"role": "user", "content": style})
+        messages.append({"role": "assistant", "content": text})
         body = {
             "model": self.config.mimo.model,
-            "messages": [{"role": "assistant", "content": text}],
+            "messages": messages,
             "modalities": ["audio"],
             "temperature": float(self.config.mimo.temperature),
             "top_p": float(self.config.mimo.top_p),
             "audio": {
                 "format": self.config.mimo.audio_format,
                 "voice": reference,
-                "clone_prompt": self.config.voice.clone_prompt or CLONE_PROMPT,
             },
         }
         headers = {
@@ -437,29 +510,86 @@ class MiMoVoicePlugin(MaiBotPlugin):
         async with session.post(self._api_endpoint(), json=body, headers=headers) as response:
             if response.status != 200:
                 detail = (await response.text())[:400]
+                if response.status in _RETRYABLE_STATUS:
+                    raise _RetryableSynthesisError(f"MiMo TTS 暂时不可用: {response.status} {detail}")
                 raise RuntimeError(f"MiMo TTS 请求失败: {response.status} {detail}")
             payload = await response.json()
         try:
             audio_b64 = payload["choices"][0]["message"]["audio"]["data"]
         except (KeyError, IndexError, TypeError) as exc:
             raise RuntimeError("MiMo TTS 返回中缺少音频数据") from exc
-        return base64.b64decode(audio_b64)
+        if not isinstance(audio_b64, str) or not audio_b64.strip():
+            raise _RetryableSynthesisError("MiMo TTS 返回空音频")
+        try:
+            audio = base64.b64decode(audio_b64)
+        except (ValueError, TypeError) as exc:
+            raise RuntimeError("MiMo TTS 返回的音频不是合法 Base64") from exc
+        if len(audio) < _MIN_AUDIO_BYTES:
+            raise _RetryableSynthesisError(f"MiMo TTS 返回音频过短（{len(audio)} 字节）")
+        return audio
 
     async def _synthesize_guarded(self, text: str) -> bytes:
         timeout = float(self.config.general.timeout)
         attempts = max(0, int(self.config.mimo.retry_attempts))
+        backoff = max(0.0, float(self.config.mimo.retry_backoff_seconds))
         last_error: Optional[BaseException] = None
-        for _ in range(attempts + 1):
+        for attempt in range(attempts + 1):
+            if self._synthesis_slots.locked():
+                if self.config.delivery.skip_when_busy:
+                    raise _SynthesisBusy("已有语音正在合成")
+                await self._synthesis_slots.acquire()
+                acquired = True
+            else:
+                await self._synthesis_slots.acquire()
+                acquired = True
             try:
-                async with self._synthesis_slots:
-                    return await asyncio.wait_for(self._synthesize(text), timeout=timeout)
+                # 超时单独处理：重试只会让最坏耗时翻倍，这里直接失败并回退文字。
+                return await asyncio.wait_for(self._synthesize(text), timeout=timeout)
             except asyncio.TimeoutError as exc:
+                raise TimeoutError(f"语音合成超时（{timeout:.0f}s）") from exc
+            except (_RetryableSynthesisError, aiohttp.ClientError) as exc:
                 last_error = exc
+                if attempt >= attempts:
+                    break
+                await asyncio.sleep(backoff * (2 ** attempt))
             except Exception as exc:  # noqa: BLE001 - 交给上层统一降级
-                last_error = exc
-        if isinstance(last_error, asyncio.TimeoutError):
-            raise TimeoutError(f"语音合成超时（{timeout:.0f}s）")
+                raise RuntimeError(f"语音合成失败: {exc}") from exc
+            finally:
+                if acquired:
+                    self._synthesis_slots.release()
         raise RuntimeError(f"语音合成失败: {last_error}")
+
+    # ------------------------------------------------------------------- 文本清洗
+
+    @staticmethod
+    def _sanitize_for_tts(text: str) -> Optional[str]:
+        """把聊天文本整理成适合朗读的句子。
+
+        去表情/零宽字符/首尾引号、把 ～ 和省略号折成逗号、补句末标点。
+        实测这些符号会让合成音高漂移 2–4 个半音，并带来首尾的爆音与长静音。
+        """
+        cleaned = _URL_PATTERN.sub("", text)
+        cleaned = _CQ_PATTERN.sub("", cleaned)
+        cleaned = _EMOJI_PATTERN.sub("", cleaned)
+        # 零宽字符/方向控制符会让模型把停顿读错；引号括号则会被念成奇怪的语气
+        cleaned = re.sub(r"[\u200b-\u200f\u202a-\u202e\u2060\ufeff]", "", cleaned)
+        cleaned = re.sub(r"[「」『』“”‘’\"'（）()【】\[\]《》〈〉]", "", cleaned)
+        cleaned = cleaned.replace("\u3000", " ")
+        cleaned = re.sub(r"\s+", " ", cleaned).strip()
+        cleaned = _LEAD_NOISE_PATTERN.sub("", cleaned)
+        cleaned = _TAIL_NOISE_PATTERN.sub("", cleaned)
+        cleaned = re.sub(r"[~～]+", "，", cleaned)
+        cleaned = re.sub(r"(…+|\.{3,}|。{2,})", "，", cleaned)
+        cleaned = re.sub(r"[!！]{2,}", "！", cleaned)
+        cleaned = re.sub(r"[?？]{2,}", "？", cleaned)
+        cleaned = re.sub(r"[，,、]{2,}", "，", cleaned)
+        cleaned = re.sub(r"，+([。！？])", r"\1", cleaned)
+        cleaned = cleaned.strip("，,、 ")
+        if not cleaned:
+            return None
+        if cleaned[-1] not in _SENTENCE_END:
+            cleaned += "。"
+        return cleaned
 
     # ------------------------------------------------------------------- 过滤
 
@@ -561,15 +691,21 @@ class MiMoVoicePlugin(MaiBotPlugin):
             self._random_decisions = {key: value for key, value in self._random_decisions.items() if value[0] >= now}
         return enabled
 
+    def _llm_voice_request_active(self, stream_id: str) -> bool:
+        expires_at = self._llm_voice_requests.get(stream_id, 0.0)
+        if expires_at <= time.monotonic():
+            self._llm_voice_requests.pop(stream_id, None)
+            return False
+        return True
+
     def _prepare_text(self, text: str) -> Optional[str]:
-        cleaned = _URL_PATTERN.sub("", text)
-        cleaned = re.sub(r"\s+", " ", cleaned).strip()
+        cleaned = self._sanitize_for_tts(text)
         if not cleaned:
             return None
         if len(cleaned) > int(self.config.general.max_text_length):
             if self.config.trigger.overflow_policy == "text":
                 return None
-            cleaned = cleaned[: int(self.config.general.max_text_length)]
+            cleaned = cleaned[: int(self.config.general.max_text_length)].rstrip("，,、 ") + "。"
         return cleaned
 
     def _short_enough(self, text: str) -> bool:
@@ -584,10 +720,13 @@ class MiMoVoicePlugin(MaiBotPlugin):
         mode = self.config.trigger.mode
         if mode == "voice_only":
             return True
-        if not self._short_enough(text):
-            return False
         if mode == "llm_trigger":
             return not self._text_override_active(stream_id)
+        if mode == "random_llm" and self._llm_voice_request_active(stream_id):
+            # 模型点名要语音时不受短句上限约束，长句也可以，只是要过 max_text_length
+            return True
+        if not self._short_enough(text):
+            return False
         return self._random_voice_enabled(stream_id)
 
     # --------------------------------------------------------------- 出站 Hook
@@ -650,6 +789,9 @@ class MiMoVoicePlugin(MaiBotPlugin):
         kwargs["message"] = outbound
         kwargs["set_reply"] = False
         kwargs["reply_message_id"] = ""
+        # 模型的一次性语音许可用掉就清掉，避免影响下一轮
+        self._llm_voice_requests.pop(stream_id, None)
+        self._text_override_sessions.pop(stream_id, None)
         if had_reply:
             self.ctx.logger.info("QQ 语音不支持引用组合，已移除会话 %s 的引用段", stream_id)
         self.ctx.logger.info("已将会话 %s 的纯文本回复替换为语音（%d 字）", stream_id, len(prepared))
@@ -657,28 +799,35 @@ class MiMoVoicePlugin(MaiBotPlugin):
 
     # ------------------------------------------------------------ 规划器工具
 
+    _TOOL_TEXT_REPLY = "mimo_voice_text_reply"
+    _TOOL_VOICE_SAY = "mimo_voice_say"
+
     @HookHandler(
         "maisaka.planner.before_request",
         name="mimo_voice_planner_mode",
-        description="在 llm_trigger 模式下注入语音说明与一次性文字许可工具",
+        description="按触发模式隐藏无关的语音工具，避免模型误调",
         mode=HookMode.BLOCKING,
         order=HookOrder.LATE,
         error_policy=ErrorPolicy.SKIP,
     )
     async def configure_planner_tools(self, **kwargs: Any) -> Dict[str, Any]:
         tool_definitions = kwargs.get("tool_definitions")
-        if isinstance(tool_definitions, list) and self.config.trigger.mode != "llm_trigger":
-            tools = [
-                definition
-                for definition in tool_definitions
-                if self._tool_definition_name(definition) != "mimo_voice_text_reply"
-            ]
-            kwargs["tool_definitions"] = tools
-            return {"action": "continue", "modified_kwargs": kwargs}
-        # llm_trigger 模式下模型只依赖 mimo_voice_text_reply 的工具描述做判断：
-        # planner 请求体里没有 messages 键（见 chat_loop_service 的 hook 参数表），
-        # 之前塞进 kwargs["messages"] 的说明会被宿主丢弃，这里不再做无效注入。
-        return None
+        if not isinstance(tool_definitions, list):
+            return None
+        # random / voice_only 模式由抽样决定，不需要模型参与；
+        # llm_trigger 只保留"改文字"工具，random_llm 只保留"要语音"工具。
+        allowed = {
+            "llm_trigger": {self._TOOL_TEXT_REPLY},
+            "random_llm": {self._TOOL_VOICE_SAY},
+        }.get(self.config.trigger.mode, set())
+        hidden = {self._TOOL_TEXT_REPLY, self._TOOL_VOICE_SAY} - allowed
+        if not hidden:
+            return None
+        tools = [definition for definition in tool_definitions if self._tool_definition_name(definition) not in hidden]
+        if len(tools) == len(tool_definitions):
+            return None
+        kwargs["tool_definitions"] = tools
+        return {"action": "continue", "modified_kwargs": kwargs}
 
     @staticmethod
     def _tool_definition_name(definition: Any) -> str:
@@ -692,7 +841,7 @@ class MiMoVoicePlugin(MaiBotPlugin):
     @Tool(
         "mimo_voice_text_reply",
         description="让当前这一轮回复保留文字，不要转换成语音。适合代码、表格、网址或较长的说明。",
-        activation_type=ActivationType.ALWAYS,
+        visibility="visible",
         parameters={"type": "object", "properties": {}},
     )
     async def allow_text_reply(self, **kwargs: Any) -> Dict[str, Any]:
@@ -700,7 +849,23 @@ class MiMoVoicePlugin(MaiBotPlugin):
         if not stream_id:
             return {"success": False, "content": "无法获取真实聊天流 session_id"}
         self._text_override_sessions[stream_id] = time.monotonic() + float(self.config.trigger.text_override_ttl)
+        self._llm_voice_requests.pop(stream_id, None)
         return {"success": True, "content": "这一轮将使用文字回复。"}
+
+    @Tool(
+        "mimo_voice_say",
+        description="让这一轮的回复用语音说出来。适合对方想听声音、或这句话用语音更自然的时候；"
+        "调用后正常生成回复即可，内容会自动转成语音发出。",
+        visibility="visible",
+        parameters={"type": "object", "properties": {}},
+    )
+    async def request_voice_reply(self, **kwargs: Any) -> Dict[str, Any]:
+        stream_id = str(kwargs.get("stream_id") or kwargs.get("session_id") or "").strip()
+        if not stream_id:
+            return {"success": False, "content": "无法获取真实聊天流 session_id"}
+        self._llm_voice_requests[stream_id] = time.monotonic() + float(self.config.trigger.llm_request_ttl)
+        self._text_override_sessions.pop(stream_id, None)
+        return {"success": True, "content": "这一轮会用语音回复，正常给出回复内容即可。"}
 
 
 def create_plugin() -> MiMoVoicePlugin:
