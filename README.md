@@ -99,6 +99,11 @@ private_mode = "all"
 
 ## 更新日志
 
+### 0.2.2
+
+- 修复 `tools/build_reference.sh` 在 ffmpeg 7.1 及以上版本直接失败的问题：淡出改用「反转 → 20ms 淡入 → 再反转」，
+  不再依赖 `afade` 的负数 `st`（新版 ffmpeg 会报 `Value -0.020000 for parameter 'st' out of range`）。
+
 ### 0.2.1
 
 - 新增 `trigger.mode = "random_llm"` 与 `mimo_voice_say` 工具：随机抽签 + 模型主动请求双触发。

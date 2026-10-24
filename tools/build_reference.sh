@@ -17,8 +17,9 @@ command -v ffmpeg >/dev/null 2>&1 || { echo "需要 ffmpeg" >&2; exit 1; }
 
 # 先统一到 24kHz，再做 asetrate 升调（asetrate 依赖输入采样率，顺序不能反）；
 # 最后裁首尾静音并加淡入淡出，避免爆音。
+# 注：淡出用「反转→淡入→再反转」实现，因为部分 ffmpeg（如 7.1.1-Jellyfin）不接受 afade 的负数 st。
 ffmpeg -hide_banner -loglevel error -y -i "$SRC" \
-  -af "aresample=24000,asetrate=24000*${PITCH},aresample=24000,atempo=${TEMPO},silenceremove=start_periods=1:start_threshold=-45dB:start_silence=${TRIM},areverse,silenceremove=start_periods=1:start_threshold=-45dB:start_silence=${TRIM},areverse,afade=t=in:st=0:d=0.02,afade=t=out:st=-0.02:d=0.02" \
+  -af "aresample=24000,asetrate=24000*${PITCH},aresample=24000,atempo=${TEMPO},silenceremove=start_periods=1:start_threshold=-45dB:start_silence=${TRIM},areverse,silenceremove=start_periods=1:start_threshold=-45dB:start_silence=${TRIM},areverse,afade=t=in:st=0:d=0.02,areverse,afade=t=in:st=0:d=0.02,areverse" \
   -ac 1 -ar 24000 -c:a pcm_s16le "$OUT"
 
 echo "已生成 $OUT："
