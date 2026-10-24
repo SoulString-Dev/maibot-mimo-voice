@@ -509,7 +509,8 @@ class MiMoVoicePlugin(MaiBotPlugin):
         session = await self._get_session()
         async with session.post(self._api_endpoint(), json=body, headers=headers) as response:
             if response.status != 200:
-                detail = (await response.text())[:400]
+                # 只留一小段用于排障：完整响应体可能很长，也不该原样进日志
+                detail = " ".join((await response.text())[:400].split())[:120]
                 if response.status in _RETRYABLE_STATUS:
                     raise _RetryableSynthesisError(f"MiMo TTS 暂时不可用: {response.status} {detail}")
                 raise RuntimeError(f"MiMo TTS 请求失败: {response.status} {detail}")
