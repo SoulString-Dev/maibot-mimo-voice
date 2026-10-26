@@ -66,7 +66,7 @@ ffmpeg -i source.wav -af "aresample=24000,asetrate=24000*1.12,aresample=24000,at
 
 `tools/build_reference.sh` 是上面命令的封装。
 
-## 配置说明（共 29 项，日常只需调前 12 项）
+## 配置说明（共 30 项，日常只需调前 12 项）
 
 | 配置 | 默认 | 说明 |
 |---|---|---|
@@ -78,6 +78,7 @@ ffmpeg -i source.wav -af "aresample=24000,asetrate=24000*1.12,aresample=24000,at
 | `trigger.short_reply_max_chars` | `60` | 短句门槛：超过该字数不走随机转语音（0 = 不限制）；模型主动请求不受限 |
 | `trigger.overflow_policy` | `text` | 超过 `general.max_text_length` 时保留文字；`truncate` 为截断后合成 |
 | `trigger.english_policy` | `strip_tics` | 英文处理：`keep` 原样念；`strip_tics` 只删 ww/emmm 这类口癖；`strip` 删所有拉丁串（会误伤真词） |
+| `trigger.random_requires_chinese` | `true` | 随机触发时，清洗后仍含英文字母就发文字而不是语音；模型主动要语音、`llm_trigger`、`voice_only` 不受影响 |
 | `filters.group_mode` | `all` | 群聊放行方式：`all` / `whitelist` / `blacklist` |
 | `filters.private_mode` | `all` | 私聊放行方式：`all` / `whitelist` / `blacklist` |
 | `filters.group_ids` | `[]` | 群号列表（配合 `group_mode`） |
@@ -120,8 +121,9 @@ private_mode = "all"
 
 - 新增内置音色：`voice.preset = bingtang | jasmine | custom`，自带冰糖/茉莉两套标准参考音频，开箱即用。
 - 配置模板重排为「基础 / 进阶」两段，给所有枚举项标注了下拉候选；`plugin.config_version` 同步 0.3.0。
-- 配置项从 40 个精简到 28 个（加上新增的 `english_policy` 共 29 个）：删掉 `top_p` / `sample_rate` / `voice_dir` / `ffmpeg_path` / `max_clip_duration` / `balanced_clip_duration` / `silence_threshold_db` / `reference_bitrate_kbps` / `max_reference_base64_mb`，
+- 配置项从 40 个精简到 28 个（加上新增的 `english_policy` 共 30 个）：删掉 `top_p` / `sample_rate` / `voice_dir` / `ffmpeg_path` / `max_clip_duration` / `balanced_clip_duration` / `silence_threshold_db` / `reference_bitrate_kbps` / `max_reference_base64_mb`，
 - 新增 `trigger.english_policy`（`keep` / `strip_tics` / `strip`）：默认只删 ww、emmm、ohhhhhhh 这类复读口癖，`LLM` / `token` / `cos` 等真词原样朗读；此前把英文读成字母的问题由此解决。
+- 新增 `trigger.random_requires_chinese`（默认开）：随机抽中的那次机会如果文本里还有英文，就直接发文字，避免把 `token`/`LLM` 念成字母；模型主动请求的语音不受影响。
   三个判定有效期合并为 `trigger.decision_ttl`；旧 `config.toml` 里的残留键会被自动忽略，无需手工清理。
 
 ### 0.2.2

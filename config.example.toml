@@ -76,6 +76,8 @@ overflow_policy = "text"
 #           strip_tics=只删 ww/emmm/ohhhhhhh 这类口癖，LLM/token/cos 等真词保留（推荐）
 #           strip=删掉所有两个字母以上的拉丁串（会误伤真词，慎用）
 english_policy = "strip_tics"
+# 随机触发时，清洗后仍含英文字母就改为发文字（不把 token/LLM 念成字母）；模型主动要语音不受影响
+random_requires_chinese = true
 
 [filters]
 # 群聊、私聊各自独立（下拉各选一个）：

@@ -139,6 +139,11 @@ class TriggerConfig(PluginConfigBase):
         "strip_tics=只删 ww/emmm/ohhhhhhh 这类口癖，保留 LLM/token/cos 等真词；"
         "strip=删掉所有两个字母以上的拉丁串（会误伤真词，慎用）",
     )
+    random_requires_chinese: bool = Field(
+        default=True,
+        description="随机触发时，清洗后仍含英文字母的回复改为发文字（避免把 token/LLM 念成字母）；"
+        "模型主动要语音、llm_trigger、voice_only 不受此限制",
+    )
 
 
 class FilterConfig(PluginConfigBase):
@@ -273,7 +278,7 @@ class MiMoVoicePlugin(MaiBotPlugin):
         strategy = self.config.voice.reference_strategy
         self.ctx.logger.info(
             "MiMo 语音插件已加载：音色=%s, mode=%s, probability=%.2f, 短句上限=%d字, 合成=%s, "
-            "风格指令=%s, 参考策略=%s, 英文=%s, 群聊放行=%s, 私聊放行=%s",
+            "风格指令=%s, 参考策略=%s, 英文=%s, 随机需纯中文=%s, 群聊放行=%s, 私聊放行=%s",
             self.config.voice.preset,
             self.config.trigger.mode,
             self.config.trigger.probability,
@@ -282,6 +287,7 @@ class MiMoVoicePlugin(MaiBotPlugin):
             "开" if self.config.voice.style_instruction.strip() else "关",
             strategy,
             self.config.trigger.english_policy,
+            "开" if self.config.trigger.random_requires_chinese else "关",
             self.config.filters.group_mode,
             self.config.filters.private_mode,
         )
@@ -786,6 +792,10 @@ class MiMoVoicePlugin(MaiBotPlugin):
             # 模型点名要语音时不受短句上限约束，长句也可以，只是要过 max_text_length
             return True
         if not self._short_enough(text):
+            return False
+        if self.config.trigger.random_requires_chinese and _LATIN_PATTERN.search(text):
+            # 随机抽中的一次机会，宁可发文字也别把 token/LLM 念成字母；
+            # 放在抽签之前，避免白耗掉 decision_ttl 内的这次判定
             return False
         return self._random_voice_enabled(stream_id)
 
