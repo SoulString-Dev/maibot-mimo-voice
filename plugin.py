@@ -33,7 +33,6 @@ from maibot_sdk.types import ErrorPolicy, HookMode, HookOrder
 
 SUPPORTED_REFERENCE_SUFFIXES = {".aac", ".flac", ".m4a", ".mp3", ".mpeg", ".ogg", ".opus", ".wav", ".wma"}
 VOICE_SEGMENT_TYPE = "voice"
-CLONE_PROMPT = "用原本的音色和语气说话，保持自然流畅，不要改变声线和说话习惯"
 DEFAULT_STYLE_INSTRUCTION = "用同一个人的音色朗读，语速平稳，情绪自然，不要夸张，不要拖长尾音。"
 _URL_PATTERN = re.compile(r"https?://\S+")
 _CQ_PATTERN = re.compile(r"\[CQ:[^\]]+\]")
@@ -44,12 +43,30 @@ _EMOJI_PATTERN = re.compile(
 _LEAD_NOISE_PATTERN = re.compile(r"^[\s'\"“”‘’「」『』（）()\[\]【】《》<>~～\-—*_`#>、，,。]+")
 _TAIL_NOISE_PATTERN = re.compile(r"[\s'\"“”‘’「」『』（）()\[\]【】《》<>*_`~～\-—、，,]+$")
 _SENTENCE_END = "。！？!?"
+_LATIN_PATTERN = re.compile(r"[A-Za-z]+")
+_VOWELS = "aeiou"
+_CONSONANTS = "bcdfghjklmnpqrstvwxyz"
 # MiMo 侧可重试的 HTTP 状态：超时与 4xx 业务错误不重试，避免把总耗时翻倍。
 _RETRYABLE_STATUS = frozenset({408, 425, 429, 500, 502, 503, 504})
 # 小于这个字节数的 mp3 基本是空音频（约 0.15 秒），按失败处理。
 _MIN_AUDIO_BYTES = 600
 _SCOPE_TTL_SECONDS = 12 * 3600.0
 _SCOPE_MAX_ENTRIES = 5000
+# 内置音色：随插件分发的标准参考音频（由 MiMo 预置音色按同一套升调/裁剪流程生成）。
+PRESET_REFERENCE_FILES = {
+    "bingtang": "reference-bingtang.wav",
+    "jasmine": "reference-jasmine.wav",
+}
+
+# 下面这些值不做成配置项：改动它们只会把音频搞坏，或者属于接口硬限制。
+_REFERENCE_SAMPLE_RATE = 24000
+_REFERENCE_BITRATE_KBPS = 64
+_REFERENCE_MAX_CLIP_SECONDS = 15.0
+_REFERENCE_BALANCED_CLIP_SECONDS = 3.0
+_REFERENCE_SILENCE_DB = -45.0
+_FFMPEG_BIN = "ffmpeg"
+# MiMo 侧参考音频 Base64 上限约 10MB，留一点余量。
+_REFERENCE_MAX_BYTES = int(9.5 * 1024 * 1024)
 
 
 class _RetryableSynthesisError(RuntimeError):
@@ -67,7 +84,7 @@ class PluginSectionConfig(PluginConfigBase):
     __ui_label__ = "基础设置"
 
     enabled: bool = Field(default=True, description="是否启用语音回复")
-    config_version: str = Field(default="0.2.1", description="配置文件版本号")
+    config_version: str = Field(default="0.3.0", description="配置文件版本号（内部使用，无需修改）")
 
 
 class GeneralConfig(PluginConfigBase):
@@ -99,24 +116,28 @@ class TriggerConfig(PluginConfigBase):
         description="random=按概率转语音；random_llm=概率抽签 + 模型主动请求（mimo_voice_say）；"
         "llm_trigger=语音优先、LLM 判断内容更适合文字时改文字；voice_only=所有纯文本都转语音",
     )
-    probability: float = Field(default=0.05, ge=0.0, le=1.0, description="random / random_llm 模式下每条回复转语音的概率")
-    random_decision_ttl: float = Field(default=8.0, ge=0.0, le=120.0, description="random 模式下同一聊天流的判定有效期（秒）")
-    text_override_ttl: float = Field(default=15.0, ge=0.0, le=300.0, description="LLM 选择文字后，该聊天流保持文字的有效期（秒）")
-    llm_request_ttl: float = Field(
-        default=20.0,
+    probability: float = Field(default=0.05, ge=0.0, le=1.0, description="random / random_llm 模式下，每条回复转语音的概率")
+    decision_ttl: float = Field(
+        default=10.0,
         ge=0.0,
         le=300.0,
-        description="random_llm 模式下，模型请求语音后该聊天流的语音有效期（秒）",
+        description="判定有效期（秒）：同一条聊天流在这么短时间内复用上一次的抽签/模型选择结果，避免逐条翻来覆去",
     )
     short_reply_max_chars: int = Field(
         default=60,
         ge=0,
         le=400,
-        description="短句门槛：超过该字数的回复不转语音（0 表示不限制）；用于让语音集中在短句上",
+        description="短句门槛：超过该字数的回复不转语音，0 表示不限制。只约束随机触发，模型主动要语音不受限",
     )
     overflow_policy: Literal["truncate", "text"] = Field(
         default="text",
-        description="超过 general.max_text_length 时：truncate=截断后合成；text=保留文字不转语音",
+        description="超过 general.max_text_length 时：truncate=截断后合成；text=保留文字不发语音",
+    )
+    english_policy: Literal["keep", "strip_tics", "strip"] = Field(
+        default="strip_tics",
+        description="英文处理：keep=原样念（会把 ww/emmm 读成字母）；"
+        "strip_tics=只删 ww/emmm/ohhhhhhh 这类口癖，保留 LLM/token/cos 等真词；"
+        "strip=删掉所有两个字母以上的拉丁串（会误伤真词，慎用）",
     )
 
 
@@ -150,24 +171,22 @@ class VoiceConfig(PluginConfigBase):
 
     __ui_label__ = "音色"
 
-    reference_path: str = Field(default="reference.wav", description="固定参考音频（相对插件目录或绝对路径）")
-    voice_dir: str = Field(default="voices", description="参考音频目录（reference_strategy 非 single_file 时使用）")
+    preset: Literal["bingtang", "jasmine", "custom"] = Field(
+        default="bingtang",
+        description="音色：bingtang=内置冰糖（偏亮）、jasmine=内置茉莉（偏低偏柔）、custom=用 reference_path 指定的自定义参考音频",
+    )
+    reference_path: str = Field(
+        default="reference.wav",
+        description="自定义参考音频文件名（仅 preset=custom 时生效），必须放在插件目录内",
+        json_schema_extra={"placeholder": "例如: reference.wav"},
+    )
     reference_strategy: Literal["single_file", "best_single", "balanced", "full_merge"] = Field(
         default="single_file",
-        description="single_file=直接用参考音频；best_single/balanced/full_merge 需要 ffmpeg，从 voice_dir 自动准备参考音频",
+        description="single_file=直接用一个文件（不需要 ffmpeg）；其余三种需要插件目录下有 ffmpeg，从 voices/ 自动截取或拼接参考音频",
     )
-    preferred_reference_file: str = Field(default="", description="best_single 时优先使用的文件名，留空自动挑选")
-    max_clip_duration: float = Field(default=15.0, ge=1.0, le=60.0, description="best_single 截取的最长时长（秒）")
-    balanced_clip_duration: float = Field(default=3.0, ge=1.0, le=30.0, description="balanced 每个文件截取的时长（秒）")
-    silence_threshold_db: float = Field(default=-45.0, ge=-80.0, le=-10.0, description="静音判定阈值（dB）")
-    sample_rate: int = Field(default=24000, ge=8000, le=48000, description="参考音频重采样率")
-    reference_bitrate_kbps: int = Field(default=64, ge=16, le=320, description="full_merge 输出 MP3 的码率")
-    max_reference_base64_mb: float = Field(default=9.5, ge=1.0, le=12.0, description="参考音频 Base64 上限（MiMo 限制约 10MB）")
-    ffmpeg_path: str = Field(default="", description="ffmpeg 路径，留空则从 PATH 查找")
-    clone_prompt: str = Field(default=CLONE_PROMPT, description="（已废弃，保留仅为兼容旧配置，不再生效）")
     style_instruction: str = Field(
         default=DEFAULT_STYLE_INSTRUCTION,
-        description="随请求发送的朗读风格指令（user 消息）；用它压住音高漂移，留空表示不发送",
+        description="随请求发送的朗读风格指令。它决定语速和语气，改动后听感变化很大；留空表示不发送",
     )
 
 
@@ -180,10 +199,19 @@ class MiMoConfig(PluginConfigBase):
     api_base_url: str = Field(default="https://api.xiaomimimo.com/v1", description="MiMo API 基础地址")
     model: str = Field(default="mimo-v2.5-tts-voiceclone", description="TTS 模型名")
     audio_format: Literal["mp3", "wav"] = Field(default="mp3", description="返回音频格式")
-    temperature: float = Field(default=0.15, ge=0.0, le=1.0, description="采样温度，越低音色越稳定")
-    top_p: float = Field(default=1.0, ge=0.1, le=1.0, description="nucleus 采样")
+    temperature: float = Field(
+        default=0.15,
+        ge=0.0,
+        le=1.0,
+        description="采样温度：越低音色越稳但可能发闷；实测 0.15 最稳，0.6 以上偶尔会听出换人",
+    )
     max_concurrent: int = Field(default=1, ge=1, le=4, description="同时合成路数，建议保持 1")
-    retry_attempts: int = Field(default=0, ge=0, le=3, description="可重试错误（429/5xx/网络）的重试次数；超时不重试")
+    retry_attempts: int = Field(
+        default=0,
+        ge=0,
+        le=3,
+        description="仅对 429/5xx/网络错误重试；超时不会重试，否则整条回复会被拖到一分钟以上",
+    )
     retry_backoff_seconds: float = Field(default=1.5, ge=0.0, le=10.0, description="重试退避基数（秒），按 2 的幂指数增长")
     connect_timeout: float = Field(default=10.0, ge=1.0, le=60.0, description="建立连接的超时（秒），与整体超时分开")
 
@@ -244,8 +272,9 @@ class MiMoVoicePlugin(MaiBotPlugin):
             self.ctx.logger.warning("MiMo 语音插件未配置 api_key，所有回复将保持文字")
         strategy = self.config.voice.reference_strategy
         self.ctx.logger.info(
-            "MiMo 语音插件已加载：mode=%s, probability=%.2f, 短句上限=%d字, 合成=%s, "
+            "MiMo 语音插件已加载：音色=%s, mode=%s, probability=%.2f, 短句上限=%d字, 合成=%s, "
             "风格指令=%s, 参考策略=%s, 群聊放行=%s, 私聊放行=%s",
+            self.config.voice.preset,
             self.config.trigger.mode,
             self.config.trigger.probability,
             int(self.config.trigger.short_reply_max_chars),
@@ -298,10 +327,19 @@ class MiMoVoicePlugin(MaiBotPlugin):
             return (plugin_dir / default_name).resolve()
 
     def _reference_path(self) -> Path:
+        """解析当前要用的参考音频：内置预设优先，找不到再退回 voice.reference_path。"""
+        preset = str(getattr(self.config.voice, "preset", "custom") or "custom").strip().lower()
+        preset_file = PRESET_REFERENCE_FILES.get(preset)
+        if preset_file:
+            plugin_dir = self._plugin_dir().resolve()
+            candidate = (plugin_dir / preset_file).resolve()
+            if candidate.is_file():
+                return candidate
+            self.ctx.logger.warning("内置音色 %s 的参考音频缺失（%s），回退到 voice.reference_path", preset, candidate)
         return self._resolve_inside_plugin(self.config.voice.reference_path, "reference.wav", "voice.reference_path")
 
     def _voice_dir(self) -> Path:
-        return self._resolve_inside_plugin(self.config.voice.voice_dir, "voices", "voice.voice_dir")
+        return self._resolve_inside_plugin("voices", "voices", "voices/")
 
     def _audio_files(self) -> List[Path]:
         directory = self._voice_dir()
@@ -322,23 +360,18 @@ class MiMoVoicePlugin(MaiBotPlugin):
         return [fixed] if fixed.is_file() else []
 
     def _ffmpeg(self) -> Optional[str]:
-        explicit = self.config.voice.ffmpeg_path.strip()
-        if explicit:
-            candidate = Path(explicit)
-            if candidate.is_file():
-                return str(candidate)
-        return shutil.which("ffmpeg")
+        return shutil.which(_FFMPEG_BIN)
 
     def _build_reference_signature(self, files: List[Path]) -> str:
         payload = {
             "strategy": self.config.voice.reference_strategy,
             "files": [[item.name, item.stat().st_mtime_ns, item.stat().st_size] for item in files],
-            "preferred": self.config.voice.preferred_reference_file,
-            "clip": self.config.voice.max_clip_duration,
-            "balanced": self.config.voice.balanced_clip_duration,
-            "silence": self.config.voice.silence_threshold_db,
-            "rate": self.config.voice.sample_rate,
-            "bitrate": self.config.voice.reference_bitrate_kbps,
+            "preferred": "",
+            "clip": _REFERENCE_MAX_CLIP_SECONDS,
+            "balanced": _REFERENCE_BALANCED_CLIP_SECONDS,
+            "silence": _REFERENCE_SILENCE_DB,
+            "rate": _REFERENCE_SAMPLE_RATE,
+            "bitrate": _REFERENCE_BITRATE_KBPS,
         }
         return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()[:16]
 
@@ -361,13 +394,13 @@ class MiMoVoicePlugin(MaiBotPlugin):
         return self._plugin_dir()
 
     def _pick_best_single(self, files: List[Path]) -> Optional[Path]:
-        preferred = self.config.voice.preferred_reference_file.strip()
+        preferred = ""
         if preferred:
             for item in files:
                 if item.name == preferred:
                     return item
         # 没有 ffprobe 时退化为“时长最接近上限”的近似选择：优先较大的文件，再截断。
-        target = self.config.voice.max_clip_duration
+        target = _REFERENCE_MAX_CLIP_SECONDS
         candidates = [item for item in files if item.stat().st_size > 8 * 1024]
         if not candidates:
             return None
@@ -378,7 +411,7 @@ class MiMoVoicePlugin(MaiBotPlugin):
         if ffmpeg is None:
             return None
         strategy = self.config.voice.reference_strategy
-        rate = int(self.config.voice.sample_rate)
+        rate = int(_REFERENCE_SAMPLE_RATE)
         workdir = self._cache_dir()
         output = workdir / f"reference-{self._reference_signature or 'x'}.wav"
         if output.is_file() and output.stat().st_size > 0:
@@ -388,8 +421,8 @@ class MiMoVoicePlugin(MaiBotPlugin):
                 source = self._pick_best_single(files)
                 if source is None:
                     return None
-                limit = float(self.config.voice.max_clip_duration)
-                silence = float(self.config.voice.silence_threshold_db)
+                limit = float(_REFERENCE_MAX_CLIP_SECONDS)
+                silence = float(_REFERENCE_SILENCE_DB)
                 filter_chain = (
                     f"silenceremove=start_periods=1:start_silence=0.1:start_threshold={silence}dB,"
                     f"areverse,silenceremove=start_periods=1:start_silence=0.1:start_threshold={silence}dB,areverse,"
@@ -398,7 +431,7 @@ class MiMoVoicePlugin(MaiBotPlugin):
                 command = [ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-i", str(source),
                            "-af", filter_chain, "-ac", "1", "-ar", str(rate), "-c:a", "pcm_s16le", str(output)]
             elif strategy == "balanced":
-                clip = float(self.config.voice.balanced_clip_duration)
+                clip = float(_REFERENCE_BALANCED_CLIP_SECONDS)
                 pieces = []
                 for index, item in enumerate(files):
                     piece = workdir / f"part-{index}.wav"
@@ -421,7 +454,7 @@ class MiMoVoicePlugin(MaiBotPlugin):
                 merged = workdir / f"reference-{self._reference_signature or 'x'}.mp3"
                 command = [ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-f", "concat", "-safe", "0",
                            "-i", str(listing), "-ac", "1", "-ar", str(rate),
-                           "-c:a", "libmp3lame", "-b:a", f"{int(self.config.voice.reference_bitrate_kbps)}k",
+                           "-c:a", "libmp3lame", "-b:a", f"{int(_REFERENCE_BITRATE_KBPS)}k",
                            str(merged)]
                 subprocess.run(command, check=True, capture_output=True)
                 return merged.read_bytes()
@@ -454,9 +487,9 @@ class MiMoVoicePlugin(MaiBotPlugin):
         payload = await asyncio.to_thread(self._reference_bytes)
         if not payload:
             raise ValueError(f"未找到参考音频：{self._reference_path()}")
-        limit = int(self.config.voice.max_reference_base64_mb * 1024 * 1024)
+        limit = _REFERENCE_MAX_BYTES
         if len(payload) > limit:
-            raise ValueError(f"参考音频过大（{len(payload) / 1024 / 1024:.1f}MB），超过 {self.config.voice.max_reference_base64_mb}MB 限制")
+            raise ValueError(f"参考音频过大（{len(payload) / 1024 / 1024:.1f}MB），超过 9.5MB 限制")
         suffix = self._reference_path().suffix.lower().lstrip(".") or "wav"
         mime = f"audio/{suffix}" if suffix not in {"mpeg", "m4a"} else "audio/mpeg"
         encoded = base64.b64encode(payload).decode("ascii")
@@ -495,7 +528,6 @@ class MiMoVoicePlugin(MaiBotPlugin):
             "messages": messages,
             "modalities": ["audio"],
             "temperature": float(self.config.mimo.temperature),
-            "top_p": float(self.config.mimo.top_p),
             "audio": {
                 "format": self.config.mimo.audio_format,
                 "voice": reference,
@@ -562,16 +594,17 @@ class MiMoVoicePlugin(MaiBotPlugin):
 
     # ------------------------------------------------------------------- 文本清洗
 
-    @staticmethod
-    def _sanitize_for_tts(text: str) -> Optional[str]:
+    def _sanitize_for_tts(self, text: str) -> Optional[str]:
         """把聊天文本整理成适合朗读的句子。
 
-        去表情/零宽字符/首尾引号、把 ～ 和省略号折成逗号、补句末标点。
+        去表情/零宽字符/首尾引号、按 english_policy 处理英文口癖、
+        把 ～ 和省略号折成逗号、补句末标点。
         实测这些符号会让合成音高漂移 2–4 个半音，并带来首尾的爆音与长静音。
         """
         cleaned = _URL_PATTERN.sub("", text)
         cleaned = _CQ_PATTERN.sub("", cleaned)
         cleaned = _EMOJI_PATTERN.sub("", cleaned)
+        cleaned = self._apply_english_policy(cleaned)
         # 零宽字符/方向控制符会让模型把停顿读错；引号括号则会被念成奇怪的语气
         cleaned = re.sub(r"[\u200b-\u200f\u202a-\u202e\u2060\ufeff]", "", cleaned)
         cleaned = re.sub(r"[「」『』“”‘’\"'（）()【】\[\]《》〈〉]", "", cleaned)
@@ -591,6 +624,31 @@ class MiMoVoicePlugin(MaiBotPlugin):
         if cleaned[-1] not in _SENTENCE_END:
             cleaned += "。"
         return cleaned
+
+    @staticmethod
+    def _is_tic_token(token: str) -> bool:
+        """判断拉丁串是不是"口癖"而不是真词。
+
+        命中两类：整词是同一个辅音的重复（ww / mmm / hhhh），
+        或一个元音 + 同一辅音重复三次以上（emmm / ohhhhhhh）。
+        LLM/SSR/boss/miss/cos/token 这类真词与缩写一律不匹配。
+        """
+        low = token.lower()
+        if len(low) < 2:
+            return False
+        if len(set(low)) == 1 and low[0] in _CONSONANTS:
+            return True
+        if low[0] in _VOWELS and len(low) >= 4 and len(set(low[1:])) == 1 and low[1] in _CONSONANTS:
+            return True
+        return False
+
+    def _apply_english_policy(self, text: str) -> str:
+        policy = self.config.trigger.english_policy
+        if policy == "keep":
+            return text
+        if policy == "strip":
+            return _LATIN_PATTERN.sub("", text)
+        return _LATIN_PATTERN.sub(lambda m: "" if self._is_tic_token(m.group(0)) else m.group(0), text)
 
     # ------------------------------------------------------------------- 过滤
 
@@ -687,7 +745,7 @@ class MiMoVoicePlugin(MaiBotPlugin):
         if entry is not None and entry[0] >= now:
             return entry[1]
         enabled = random.random() < float(self.config.trigger.probability)
-        self._random_decisions[stream_id] = (now + float(self.config.trigger.random_decision_ttl), enabled)
+        self._random_decisions[stream_id] = (now + float(self.config.trigger.decision_ttl), enabled)
         if len(self._random_decisions) > _SCOPE_MAX_ENTRIES:
             self._random_decisions = {key: value for key, value in self._random_decisions.items() if value[0] >= now}
         return enabled
@@ -849,7 +907,7 @@ class MiMoVoicePlugin(MaiBotPlugin):
         stream_id = str(kwargs.get("stream_id") or kwargs.get("session_id") or "").strip()
         if not stream_id:
             return {"success": False, "content": "无法获取真实聊天流 session_id"}
-        self._text_override_sessions[stream_id] = time.monotonic() + float(self.config.trigger.text_override_ttl)
+        self._text_override_sessions[stream_id] = time.monotonic() + float(self.config.trigger.decision_ttl)
         self._llm_voice_requests.pop(stream_id, None)
         return {"success": True, "content": "这一轮将使用文字回复。"}
 
@@ -864,7 +922,7 @@ class MiMoVoicePlugin(MaiBotPlugin):
         stream_id = str(kwargs.get("stream_id") or kwargs.get("session_id") or "").strip()
         if not stream_id:
             return {"success": False, "content": "无法获取真实聊天流 session_id"}
-        self._llm_voice_requests[stream_id] = time.monotonic() + float(self.config.trigger.llm_request_ttl)
+        self._llm_voice_requests[stream_id] = time.monotonic() + float(self.config.trigger.decision_ttl)
         self._text_override_sessions.pop(stream_id, None)
         return {"success": True, "content": "这一轮会用语音回复，正常给出回复内容即可。"}
 

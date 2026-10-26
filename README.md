@@ -1,11 +1,12 @@
 # maibot-mimo-voice
 
-把麦麦（MaiBot）的**纯文本回复**按策略替换成 MiMo 语音条，音色来自你自己提供的参考音频。
+把麦麦（MaiBot）的**纯文本回复**按策略替换成 MiMo 语音条。开箱自带两套标准音色（冰糖 / 茉莉），也可以换成自己的参考音频。
 
 思路参考 [Ling-LA/ling-tts-bot](https://github.com/Ling-LA/ling-tts-bot)（MIT），本仓库做了取舍与重写，主要差异：
 
 | 改动 | 原因 |
 |---|---|
+| 内置冰糖 / 茉莉两套标准参考音频，`voice.preset` 一键切换 | 自带的克隆样本不具普适性；开箱就能出声，想定制再换 `custom` |
 | 默认 `random` + `probability = 0.05` + 短句门槛 60 字 | 全量转语音太激进；语音集中在短句上更像真人插话 |
 | `random_llm` 双触发：随机抽签 + 模型可调 `mimo_voice_say` 主动要语音 | 群友想听声音时能立刻出声，日常仍由概率控制频率 |
 | 支持群聊/私聊 `all / whitelist / blacklist` | 灰度上线时可以先只在指定群或私聊里出声 |
@@ -32,10 +33,23 @@
 
 1. 把仓库放进麦麦的插件目录（如 `data/MaiBot/plugins/maibot-mimo-voice`）。
 2. 复制 `config.example.toml` 为 `config.toml`，填好 `[mimo] api_key`。
-3. 准备参考音频放到插件目录（见下一节），默认文件名 `reference.wav`。
+3. 音色默认用内置的冰糖（`voice.preset = "bingtang"`），不需要自己准备参考音频；
+   想换成自己的声音时，把参考音频放进插件目录并把 `voice.preset` 改成 `custom`。
 4. 生效方式：重启核心，或者直接改插件目录里的文件——麦麦的文件监视会自动重载扩展插件。
 
 依赖：`aiohttp`（麦麦插件运行时已自带）。
+
+## 内置音色
+
+| `voice.preset` | 音色 | 说明 |
+|---|---|---|
+| `bingtang` | 冰糖（默认） | MiMo 预置女声，按「升 12% 音高 + 22% 总语速」生成，约 2.9 秒参考 |
+| `jasmine` | 茉莉 | 比冰糖略低、更柔和一些，约 3.2 秒参考 |
+| `custom` | 自定义 | 用 `voice.reference_path` 指向插件目录内的参考音频 |
+
+两套内置参考都是**合成音色**（不是真人录音），随插件分发，可以直接在公开仓库里带。
+两者都是先用 MiMo 预置音色生成原始采样，再跑 `tools/build_reference.sh`（升调 1.12、`atempo` 1.08、裁首尾静音）。
+
 
 ## 准备参考音频
 
@@ -52,15 +66,18 @@ ffmpeg -i source.wav -af "aresample=24000,asetrate=24000*1.12,aresample=24000,at
 
 `tools/build_reference.sh` 是上面命令的封装。
 
-## 配置说明
+## 配置说明（共 29 项，日常只需调前 12 项）
 
 | 配置 | 默认 | 说明 |
 |---|---|---|
+| `voice.preset` | `bingtang` | 音色：`bingtang` / `jasmine` / `custom` |
+| `voice.reference_path` | `reference.wav` | 仅 `preset = custom` 时生效，必须在插件目录内 |
 | `trigger.mode` | `random` | `random` 按概率；`random_llm` 概率 + 模型主动请求；`llm_trigger` 语音优先、模型可改文字；`voice_only` 全部转语音 |
 | `trigger.probability` | `0.05` | random / random_llm 模式下每条回复转语音的概率 |
-| `trigger.llm_request_ttl` | `20.0` | random_llm 模式下，模型请求语音的有效期（秒） |
-| `trigger.short_reply_max_chars` | `60` | 超过该字数不走随机转语音（0 = 不限制）；模型请求不受限 |
+| `trigger.decision_ttl` | `10.0` | 判定有效期（秒）：同一聊天流在这段时间内复用上一次的抽签/模型选择结果 |
+| `trigger.short_reply_max_chars` | `60` | 短句门槛：超过该字数不走随机转语音（0 = 不限制）；模型主动请求不受限 |
 | `trigger.overflow_policy` | `text` | 超过 `general.max_text_length` 时保留文字；`truncate` 为截断后合成 |
+| `trigger.english_policy` | `strip_tics` | 英文处理：`keep` 原样念；`strip_tics` 只删 ww/emmm 这类口癖；`strip` 删所有拉丁串（会误伤真词） |
 | `filters.group_mode` | `all` | 群聊放行方式：`all` / `whitelist` / `blacklist` |
 | `filters.private_mode` | `all` | 私聊放行方式：`all` / `whitelist` / `blacklist` |
 | `filters.group_ids` | `[]` | 群号列表（配合 `group_mode`） |
@@ -99,6 +116,14 @@ private_mode = "all"
 
 ## 更新日志
 
+### 0.3.0
+
+- 新增内置音色：`voice.preset = bingtang | jasmine | custom`，自带冰糖/茉莉两套标准参考音频，开箱即用。
+- 配置模板重排为「基础 / 进阶」两段，给所有枚举项标注了下拉候选；`plugin.config_version` 同步 0.3.0。
+- 配置项从 40 个精简到 28 个（加上新增的 `english_policy` 共 29 个）：删掉 `top_p` / `sample_rate` / `voice_dir` / `ffmpeg_path` / `max_clip_duration` / `balanced_clip_duration` / `silence_threshold_db` / `reference_bitrate_kbps` / `max_reference_base64_mb`，
+- 新增 `trigger.english_policy`（`keep` / `strip_tics` / `strip`）：默认只删 ww、emmm、ohhhhhhh 这类复读口癖，`LLM` / `token` / `cos` 等真词原样朗读；此前把英文读成字母的问题由此解决。
+  三个判定有效期合并为 `trigger.decision_ttl`；旧 `config.toml` 里的残留键会被自动忽略，无需手工清理。
+
 ### 0.2.2
 
 - 修复 `tools/build_reference.sh` 在 ffmpeg 7.1 及以上版本直接失败的问题：淡出改用「反转 → 20ms 淡入 → 再反转」，
@@ -109,7 +134,7 @@ private_mode = "all"
 - 新增 `trigger.mode = "random_llm"` 与 `mimo_voice_say` 工具：随机抽签 + 模型主动请求双触发。
 - 合成前清洗文本（表情、引号、波浪号、省略号、重复标点），并补 `style_instruction` 压住音高漂移。
 - 硬化：空音频/过短音频判定、超时不再重试、可重试错误指数退避、建连超时独立、
-  并发满直接发文字不排队、参考音频与 `voice_dir` 限制在插件目录内、工具加 `visibility`。
+  并发满直接发文字不排队、参考音频路径限制在插件目录内、工具加 `visibility`。
 
 ### 0.2.0
 
