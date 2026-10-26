@@ -273,7 +273,7 @@ class MiMoVoicePlugin(MaiBotPlugin):
         strategy = self.config.voice.reference_strategy
         self.ctx.logger.info(
             "MiMo 语音插件已加载：音色=%s, mode=%s, probability=%.2f, 短句上限=%d字, 合成=%s, "
-            "风格指令=%s, 参考策略=%s, 群聊放行=%s, 私聊放行=%s",
+            "风格指令=%s, 参考策略=%s, 英文=%s, 群聊放行=%s, 私聊放行=%s",
             self.config.voice.preset,
             self.config.trigger.mode,
             self.config.trigger.probability,
@@ -281,6 +281,7 @@ class MiMoVoicePlugin(MaiBotPlugin):
             self.config.mimo.model,
             "开" if self.config.voice.style_instruction.strip() else "关",
             strategy,
+            self.config.trigger.english_policy,
             self.config.filters.group_mode,
             self.config.filters.private_mode,
         )
