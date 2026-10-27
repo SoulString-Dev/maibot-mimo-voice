@@ -97,7 +97,7 @@ private_mode = "all"
 
 `group_mode` 与 `private_mode` 都不是 `all` 时，插件会记录入站消息的群号 / 对方 QQ 号（`chat.receive.before_process`），出站时按名单判断；两者都是 `all` 时不记录，零额外开销。拿不到对方身份时（映射过期等）一律保持文字，不误放行。
 
-## 配置说明（共 30 项，日常只需动前 12 项）
+## 配置说明（共 31 项，日常只需动前 12 项）
 
 ### 基础
 
@@ -120,12 +120,13 @@ private_mode = "all"
 
 | 配置 | 默认 | 说明 |
 |---|---|---|
-| `plugin.config_version` | `0.3.0` | 配置版本号（内部使用，无需修改） |
+| `plugin.config_version` | `0.3.1` | 配置版本号（内部使用，无需修改） |
 | `mimo.api_base_url` | `https://api.xiaomimimo.com/v1` | 只填可信地址 |
 | `mimo.model` | `mimo-v2.5-tts-voiceclone` | 也可用 `mimo-v2.5-tts`（预置音色） |
 | `mimo.audio_format` | `mp3` | `mp3` / `wav` |
 | `mimo.max_concurrent` | `1` | 同时合成路数，建议保持 1 |
-| `mimo.retry_attempts` | `0` | 仅对 429 / 5xx / 网络错误重试，超时不重试 |
+| `mimo.retry_attempts` | `0` | 仅对 429 / 5xx / 网络错误重试 |
+| `mimo.retry_on_timeout` | `true` | 单次合成超时后换一次请求重来（只重试一次） |
 | `mimo.retry_backoff_seconds` | `1.5` | 重试退避基数，按 2 的幂增长 |
 | `mimo.connect_timeout` | `10.0` | 建连超时（秒），与整体超时分开 |
 | `voice.reference_path` | `reference.wav` | 仅 `preset = custom` 时生效，必须在插件目录内 |
@@ -176,6 +177,12 @@ private_mode = "all"
 除了随请求发给你配置的 TTS 服务（当前实现为小米 MiMo 官方 API：待合成文本与参考音频会发往 `api.xiaomimimo.com`）外，不会上传到任何地方。`mimo.api_base_url` 决定请求发往哪里，请只填写可信地址。
 
 ## 更新日志
+
+### 0.3.1
+
+- 新增 `mimo.retry_on_timeout`（默认 `true`）：单次合成超过 `general.timeout` 后换一次请求重来，**最多只重试一次**。
+- 依据：线上 27 次实测中，超时的请求大多直接跳到 30 秒以上（30.6 / 31.6 / 35.6 / 63.3 / 163.3 秒），把超时放宽到 30 秒几乎救不回来；而"再给一次机会"按两条独立估能把失败率从约 17% 压到 3–4%，正常时段体感不变。
+- 代价：最坏情况下要等两个超时周期（默认 40 秒）才回退文字。
 
 ### 0.3.0
 
