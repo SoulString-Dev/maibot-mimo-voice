@@ -1,43 +1,41 @@
 # maibot-mimo-voice
 
-把麦麦（MaiBot）的**纯文本回复**按策略替换成 MiMo 语音条。开箱自带两套标准音色（冰糖 / 茉莉），也可以换成自己的参考音频。
+把麦麦（MaiBot）的**纯文本回复**按策略换成 MiMo 语音条。开箱自带两套标准音色（冰糖 / 茉莉），也可以换成自己的参考音频。
 
-思路参考 [Ling-LA/ling-tts-bot](https://github.com/Ling-LA/ling-tts-bot)（MIT），本仓库做了取舍与重写，主要差异：
+思路参考 [Ling-LA/ling-tts-bot](https://github.com/Ling-LA/ling-tts-bot)（MIT），本仓库在触发方式、文本清洗与工程细节上做了重写，差异见下表。
 
-| 改动 | 原因 |
+## 它能做什么
+
+- 语音条**替换**文字：命中的那条回复只发语音，不发文字。
+- 四种触发方式：纯概率、概率 + 模型主动请求、语音优先、全量。
+- 群聊 / 私聊各自独立的 `all / whitelist / blacklist` 放行策略。
+- 合成失败或超时默认**回退发文字**，消息不会丢。
+- 合成前清洗文本（表情、引号、波浪号、省略号、重复标点），并用风格指令压住音色漂移。
+- 英文处理策略可配：默认只删 `ww` / `emmm` / `ohhhhhhh` 这类复读口癖，`LLM`、`token`、`cos` 等真词原样朗读。
+
+| 与上游的差异 | 原因 |
 |---|---|
-| 内置冰糖 / 茉莉两套标准参考音频，`voice.preset` 一键切换 | 自带的克隆样本不具普适性；开箱就能出声，想定制再换 `custom` |
+| 内置冰糖 / 茉莉两套参考音频，`voice.preset` 一键切换 | 自带的克隆样本不具普适性；开箱就能出声，想定制再换 `custom` |
 | 默认 `random` + `probability = 0.05` + 短句门槛 60 字 | 全量转语音太激进；语音集中在短句上更像真人插话 |
 | `random_llm` 双触发：随机抽签 + 模型可调 `mimo_voice_say` 主动要语音 | 群友想听声音时能立刻出声，日常仍由概率控制频率 |
-| 支持群聊/私聊 `all / whitelist / blacklist` | 灰度上线时可以先只在指定群或私聊里出声 |
-| 参考音频支持固定单文件，也保留 `best_single / balanced / full_merge` | 单文件不需要 ffmpeg；需要自动挑选/拼接时仍可用原策略 |
-| 朗读前清洗文本 + `style_instruction` 风格指令 | 表情/引号/波浪号/省略号会让音高漂移 2–4 个半音并带来首尾爆音，清洗后 σ 从 34.6Hz 降到 5.5–13.6Hz |
+| 支持群聊 / 私聊 `all / whitelist / blacklist` | 灰度上线时可以先只在指定群或私聊里出声 |
+| 参考音频支持固定单文件，也保留 `best_single / balanced / full_merge` | 单文件不需要 ffmpeg；需要自动挑选 / 拼接时仍可用原策略 |
+| 朗读前清洗文本 + `style_instruction` 风格指令 | 表情 / 引号 / 波浪号 / 省略号会让音高漂移 2–4 个半音并带来首尾爆音，清洗后 σ 从 34.6Hz 降到 5.5–13.6Hz |
 | `temperature` 默认 0.15 | 实测同一句三次的中位音高漂移从 ~11Hz 降到 ~2Hz |
 | 合成超时默认 20 秒，超时回退文字且**不重试** | 上游 TTS p95 约 48 秒，不能把回复拖到一分钟 |
 | 合成并发默认 1 路，满了直接发文字（`skip_when_busy`） | 3 路并发会把单路延迟推到 50–96 秒 |
 | 参考音频路径限制在插件目录内 | 防止配置被改成 `/etc/...` 之类的越界读取 |
 | 不做音频缓存 | LLM 生成的回复几乎不会逐字重复，缓存命中率极低 |
 
-## 效果与取舍
-
-- 语音条**替换**文字：命中的那条回复只发语音，不再发文字。
-- 超时或失败默认**回退发文字**（`delivery.fallback_to_text = true`），保证消息不丢。
-- QQ 不支持「引用 + 语音」组合，转语音时会自动去掉引用段。
-- `llm_trigger` 模式下模型可以调 `mimo_voice_text_reply` 把这一轮改回文字（代码、表格、链接等）。
-- `random_llm` 模式下模型可以调 `mimo_voice_say` 主动要语音；随机抽签同时保留，互不冲突。
-- 两种模型工具只在对应模式下暴露给 planner，其它模式自动隐藏，避免误调。
-- 合成前会把文本整理成"能念"的样子：去掉表情/零宽字符/首尾引号，`～` 和省略号折成逗号，
-  重复感叹号收敛，末尾补齐句号。
-
 ## 安装
 
-1. 把仓库放进麦麦的插件目录（如 `data/MaiBot/plugins/maibot-mimo-voice`）。
+1. 把仓库放进麦麦的插件目录（如 `data/MaiMBot/plugins/maibot-mimo-voice`）。
 2. 复制 `config.example.toml` 为 `config.toml`，填好 `[mimo] api_key`。
 3. 音色默认用内置的冰糖（`voice.preset = "bingtang"`），不需要自己准备参考音频；
    想换成自己的声音时，把参考音频放进插件目录并把 `voice.preset` 改成 `custom`。
 4. 生效方式：重启核心，或者直接改插件目录里的文件——麦麦的文件监视会自动重载扩展插件。
 
-依赖：`aiohttp`（麦麦插件运行时已自带）。
+依赖：`aiohttp`（麦麦插件运行时已自带）。只有用 `best_single` / `balanced` / `full_merge` 参考策略时才需要宿主机上的 `ffmpeg`。
 
 ## 内置音色
 
@@ -47,51 +45,48 @@
 | `jasmine` | 茉莉 | 比冰糖略低、更柔和一些，约 3.2 秒参考 |
 | `custom` | 自定义 | 用 `voice.reference_path` 指向插件目录内的参考音频 |
 
-两套内置参考都是**合成音色**（不是真人录音），随插件分发，可以直接在公开仓库里带。
-两者都是先用 MiMo 预置音色生成原始采样，再跑 `tools/build_reference.sh`（升调 1.12、`atempo` 1.08、裁首尾静音）。
+两套内置参考都是**合成音色**（不是真人录音），随插件分发。
+生成方式：先用 MiMo 预置音色生成原始采样，再跑 `tools/build_reference.sh`（升调 1.12、`atempo` 1.08、裁首尾静音）。
 
-
-## 准备参考音频
+## 换成自己的声音
 
 推荐在**宿主机**上做，不用进容器：
 
 ```bash
-# 1) 准备一段 5–20 秒、安静环境录的干净人声（或从喜欢的主播/TTS 音色里截一段）
-# 2) 按需做音高/语速调整，例如"升 12% / 提速 8%"：
+# 1) 准备一段 5–20 秒、安静环境录的干净人声（或从喜欢的主播 / TTS 音色里截一段）
+# 2) 按需做音高 / 语速调整，例如"升 12% / 提速 8%"：
 ffmpeg -i source.wav -af "aresample=24000,asetrate=24000*1.12,aresample=24000,atempo=1.08" -ac 1 -ar 24000 reference.wav
 ```
 
 > 实测：参考音频升调后，克隆输出会跟着抬高（1.06× 参考 → 输出约 1.05×），
 > 所以"预设音色 → 升调提速 → 当参考"只需做一次。
 
-`tools/build_reference.sh` 是上面命令的封装。
+把文件放进插件目录，配置改成：
 
-## 配置说明（共 30 项，日常只需调前 12 项）
+```toml
+[voice]
+preset = "custom"
+reference_path = "reference.wav"
+```
 
-| 配置 | 默认 | 说明 |
-|---|---|---|
-| `voice.preset` | `bingtang` | 音色：`bingtang` / `jasmine` / `custom` |
-| `voice.reference_path` | `reference.wav` | 仅 `preset = custom` 时生效，必须在插件目录内 |
-| `trigger.mode` | `random` | `random` 按概率；`random_llm` 概率 + 模型主动请求；`llm_trigger` 语音优先、模型可改文字；`voice_only` 全部转语音 |
-| `trigger.probability` | `0.05` | random / random_llm 模式下每条回复转语音的概率 |
-| `trigger.decision_ttl` | `10.0` | 判定有效期（秒）：同一聊天流在这段时间内复用上一次的抽签/模型选择结果 |
-| `trigger.short_reply_max_chars` | `60` | 短句门槛：超过该字数不走随机转语音（0 = 不限制）；模型主动请求不受限 |
-| `trigger.overflow_policy` | `text` | 超过 `general.max_text_length` 时保留文字；`truncate` 为截断后合成 |
-| `trigger.english_policy` | `strip_tics` | 英文处理：`keep` 原样念；`strip_tics` 只删 ww/emmm 这类口癖；`strip` 删所有拉丁串（会误伤真词） |
-| `trigger.random_requires_chinese` | `true` | 随机触发时，清洗后仍含英文字母就发文字而不是语音；模型主动要语音、`llm_trigger`、`voice_only` 不受影响 |
-| `filters.group_mode` | `all` | 群聊放行方式：`all` / `whitelist` / `blacklist` |
-| `filters.private_mode` | `all` | 私聊放行方式：`all` / `whitelist` / `blacklist` |
-| `filters.group_ids` | `[]` | 群号列表（配合 `group_mode`） |
-| `filters.private_user_ids` | `[]` | 私聊对方 QQ 号列表（配合 `private_mode`） |
-| `general.timeout` | `20.0` | 单次合成超时（秒），超时不重试 |
-| `voice.style_instruction` | 见模板 | 随请求发送的朗读风格指令，留空则不发 |
-| `mimo.temperature` | `0.15` | 越低越稳；0.7 以上能听出"换人" |
-| `mimo.max_concurrent` | `1` | 同时合成路数，建议保持 1 |
-| `mimo.retry_attempts` | `0` | 仅对 429/5xx/网络错误重试 |
-| `delivery.fallback_to_text` | `true` | 失败时发文字还是拦截 |
-| `delivery.skip_when_busy` | `true` | 并发满时直接发文字，不排队 |
+`tools/build_reference.sh` 是上面命令的封装，额外做了首尾静音裁剪与 20ms 淡入淡出。
 
-群聊和私聊互不影响，例如"群聊只放行一个群、私聊全放行"：
+## 触发方式
+
+| `trigger.mode` | 行为 |
+|---|---|
+| `random`（默认） | 每条回复按 `probability` 抽签；抽中且不超过 `short_reply_max_chars` 才转语音 |
+| `random_llm` | 随机抽签照常，同时给 planner 暴露 `mimo_voice_say`，模型可以主动要求"这条用语音回" |
+| `llm_trigger` | 默认语音优先，模型可调 `mimo_voice_text_reply` 把这一轮改回文字（代码、表格、链接等） |
+| `voice_only` | 全部转语音（仍受 `max_text_length` 与放行策略约束） |
+
+- 同一聊天流在 `trigger.decision_ttl`（默认 10 秒）内复用上一次的抽签结果，避免连发多条时概率失真。
+- 两种模型工具只在对应模式下暴露，其它模式自动隐藏，防止误调。
+- `random_requires_chinese = true`（默认）时，随机抽中的那条如果清洗后仍含英文字母，就直接发文字——`token`、`LLM` 这类会被逐字母念出来。模型主动请求的语音、`llm_trigger`、`voice_only` 不受此限制。
+
+## 群聊 / 私聊过滤
+
+两者互不影响，例如"群聊只放行一个群、私聊全放行"：
 
 ```toml
 [filters]
@@ -100,57 +95,129 @@ group_ids = ["589957759"]
 private_mode = "all"
 ```
 
-`group_mode` 与 `private_mode` 都不是 `all` 时，插件会记录入站消息的群号/对方 QQ 号
-（`chat.receive.before_process`），出站时按名单判断；两者都是 `all` 时不记录，零额外开销。
-拿不到对方身份时（映射过期等）一律保持文字，不误放行。
+`group_mode` 与 `private_mode` 都不是 `all` 时，插件会记录入站消息的群号 / 对方 QQ 号（`chat.receive.before_process`），出站时按名单判断；两者都是 `all` 时不记录，零额外开销。拿不到对方身份时（映射过期等）一律保持文字，不误放行。
 
-## 实测数据（2026-10-23 ~ 10-24，MiMo 官方接口）
+## 配置说明（共 30 项，日常只需动前 12 项）
 
-- 克隆耗时：20 次顺序请求，p50 **5.1s**、p90 28.4s、max 47.6s，全部成功。
-- 音色稳定性（同一句合成 5 次，测中位 f0 的离散度）：
-  - 原始文本 + `temperature=0.15`：σ **34.6Hz**、range 82.4Hz
-  - 只做文本清洗：σ 23.3Hz
-  - 清洗 + 默认 `style_instruction`：σ **5.5–13.6Hz**、range 13.6–42.3Hz
-- 标点的影响（原始文本，2 次）：`～` 让中位音高冲到 313–320Hz，emoji 让两次结果差 68Hz（≈4 个半音），
-  `……` 产生 0.45–0.49s 尾部静音，`！` 会尾部截断并带噪声。这就是先清洗文本的原因。
-- 并发：2 路正常；3 路开始排队；5 路直接 429。
+### 基础
+
+| 配置 | 默认 | 说明 |
+|---|---|---|
+| `plugin.enabled` | `true` | 总开关 |
+| `mimo.api_key` | 空 | MiMo 官方 API Key |
+| `voice.preset` | `bingtang` | 音色：`bingtang` / `jasmine` / `custom` |
+| `trigger.mode` | `random` | 见「触发方式」 |
+| `trigger.probability` | `0.05` | `random` / `random_llm` 模式下每条回复转语音的概率 |
+| `trigger.short_reply_max_chars` | `60` | 随机转语音的字数门槛（0 = 不限制）；模型主动请求不受限 |
+| `general.max_text_length` | `300` | 单条语音最多念多少字，超出按 `overflow_policy` 处理 |
+| `general.timeout` | `20.0` | 单次合成超时（秒），超时不重试 |
+| `mimo.temperature` | `0.15` | 越低越稳；0.7 以上能听出"换人" |
+| `voice.style_instruction` | 见模板 | 随请求发送的朗读风格指令，留空则不发 |
+| `delivery.fallback_to_text` | `true` | 合成失败 / 超时时发文字还是拦截 |
+| `delivery.skip_when_busy` | `true` | 并发路数占满时直接发文字，不排队 |
+
+### 进阶
+
+| 配置 | 默认 | 说明 |
+|---|---|---|
+| `plugin.config_version` | `0.3.0` | 配置版本号（内部使用，无需修改） |
+| `mimo.api_base_url` | `https://api.xiaomimimo.com/v1` | 只填可信地址 |
+| `mimo.model` | `mimo-v2.5-tts-voiceclone` | 也可用 `mimo-v2.5-tts`（预置音色） |
+| `mimo.audio_format` | `mp3` | `mp3` / `wav` |
+| `mimo.max_concurrent` | `1` | 同时合成路数，建议保持 1 |
+| `mimo.retry_attempts` | `0` | 仅对 429 / 5xx / 网络错误重试，超时不重试 |
+| `mimo.retry_backoff_seconds` | `1.5` | 重试退避基数，按 2 的幂增长 |
+| `mimo.connect_timeout` | `10.0` | 建连超时（秒），与整体超时分开 |
+| `voice.reference_path` | `reference.wav` | 仅 `preset = custom` 时生效，必须在插件目录内 |
+| `voice.reference_strategy` | `single_file` | 需要 ffmpeg 的策略：`best_single` / `balanced` / `full_merge` |
+| `trigger.decision_ttl` | `10.0` | 判定有效期（秒） |
+| `trigger.overflow_policy` | `text` | 超长时：`text` 保留文字；`truncate` 截断后合成 |
+| `trigger.english_policy` | `strip_tics` | `keep` 原样念；`strip_tics` 只删复读口癖；`strip` 删所有拉丁串（会误伤真词） |
+| `trigger.random_requires_chinese` | `true` | 随机路径遇英文改发文字 |
+| `filters.group_mode` | `all` | 群聊放行：`all` / `whitelist` / `blacklist` |
+| `filters.private_mode` | `all` | 私聊放行：`all` / `whitelist` / `blacklist` |
+| `filters.group_ids` | `[]` | 群号列表 |
+| `filters.private_user_ids` | `[]` | 私聊对方 QQ 号列表 |
+
+旧版本的残留键会被自动忽略（`extra="ignore"`），升级时不需要手工清理 `config.toml`。
+
+## 线上表现
+
+自 2026-10-24 起在真实群聊中运行，语音条数占 bot 消息的比例：
+
+| 日期 | bot 消息 | 语音条 | 占比 |
+|---|---|---|---|
+| 10-24 | 257 | 25 | 9.7% |
+| 10-25 | 159 | 12 | 7.5% |
+| 10-26 | 410 | 28 | 6.8% |
+| 10-27 | 427 | 43 | 10.1% |
+| 10-28（半天） | 24 | 3 | 12.5% |
+
+0.3.0（10-26 22:21）上线后共 46 条语音：
+
+- 含拉丁字母 **0 条**，含 `ww` / `emmm` / `ohhh` 口癖 **0 条**（此前两天分别是 9 条和 4 条）。
+- 全部为单段 `voice`，没有引用段残留（QQ 不支持「引用 + 语音」）。
+- 同期 bot 文本中仍有 23.9% 带 2 个以上连续拉丁字母，这些在随机路径下被跳过、改发文字。
+
+合成失败（去重后 43 次）全部是 `20s` 超时后的回退，集中在 10-27 14:07–20:51 上游变慢的窗口；10-28 全天 0 次。
+
+## 已知限制
+
+- QQ 不支持「引用 + 语音」组合，转语音时会去掉引用段。
+- `random_requires_chinese` 只约束随机路径；模型主动请求的语音如果文本里有英文，仍会被逐字母念出来（此时可把 `english_policy` 设为 `strip`，代价是 `token`、`cos` 这类词也会被删）。
+- `strip_tics` 的口癖白名单基于「整词重复辅音 / 元音 + 重复辅音≥3」的启发式，`yyds`、`awsl`、`nb` 这类网络缩写不会被删。
+- 上游 TTS 延迟抖动大（p50 约 5 秒、p95 约 48 秒），超时时间不建议压到 10 秒以下。
+- 单路并发是有意为之：3 路并发会让单路延迟翻十倍。
+
+## 隐私
+
+参考音频只保存在本地插件目录；使用 ffmpeg 参考策略时，处理结果缓存在宿主提供的 runtime 目录下的 `reference-cache/`（拿不到时退回插件目录）。
+
+除了随请求发给你配置的 TTS 服务（当前实现为小米 MiMo 官方 API：待合成文本与参考音频会发往 `api.xiaomimimo.com`）外，不会上传到任何地方。`mimo.api_base_url` 决定请求发往哪里，请只填写可信地址。
 
 ## 更新日志
 
 ### 0.3.0
 
-- 新增内置音色：`voice.preset = bingtang | jasmine | custom`，自带冰糖/茉莉两套标准参考音频，开箱即用。
-- 配置模板重排为「基础 / 进阶」两段，给所有枚举项标注了下拉候选；`plugin.config_version` 同步 0.3.0。
-- 配置项从 40 个精简到 28 个（加上新增的 `english_policy` 共 30 个）：删掉 `top_p` / `sample_rate` / `voice_dir` / `ffmpeg_path` / `max_clip_duration` / `balanced_clip_duration` / `silence_threshold_db` / `reference_bitrate_kbps` / `max_reference_base64_mb`，
-- 新增 `trigger.english_policy`（`keep` / `strip_tics` / `strip`）：默认只删 ww、emmm、ohhhhhhh 这类复读口癖，`LLM` / `token` / `cos` 等真词原样朗读；此前把英文读成字母的问题由此解决。
-- 新增 `trigger.random_requires_chinese`（默认开）：随机抽中的那次机会如果文本里还有英文，就直接发文字，避免把 `token`/`LLM` 念成字母；模型主动请求的语音不受影响。
-  三个判定有效期合并为 `trigger.decision_ttl`；旧 `config.toml` 里的残留键会被自动忽略，无需手工清理。
+- 新增内置音色 `voice.preset = bingtang | jasmine | custom`，自带冰糖 / 茉莉两套标准参考音频，开箱即用。
+- 配置项从 40 个精简到 30 个：删掉 `top_p`、`sample_rate`、`voice_dir`、`ffmpeg_path`、`max_clip_duration`、`balanced_clip_duration`、`silence_threshold_db`、`reference_bitrate_kbps`、`max_reference_base64_mb`；三个判定有效期合并为 `trigger.decision_ttl`。
+- 配置模板重排为「基础 / 进阶」两段，给所有枚举项标注了下拉候选，`plugin.config_version` 同步 0.3.0；旧 `config.toml` 的残留键会被自动忽略。
+- 新增 `trigger.english_policy`（`keep` / `strip_tics` / `strip`）：默认只删 `ww`、`emmm`、`ohhhhhhh` 这类复读口癖，`LLM`、`token`、`cos` 等真词原样朗读。
+- 新增 `trigger.random_requires_chinese`（默认开）：随机抽中的那次如果清洗后仍含英文，就直接发文字；模型主动请求、`llm_trigger`、`voice_only` 不受影响。
 
 ### 0.2.2
 
-- 修复 `tools/build_reference.sh` 在 ffmpeg 7.1 及以上版本直接失败的问题：淡出改用「反转 → 20ms 淡入 → 再反转」，
-  不再依赖 `afade` 的负数 `st`（新版 ffmpeg 会报 `Value -0.020000 for parameter 'st' out of range`）。
+- 修复 `tools/build_reference.sh` 在 ffmpeg 7.1 及以上版本直接失败的问题：淡出改用「反转 → 20ms 淡入 → 再反转」，不再依赖 `afade` 的负数 `st`。
 
 ### 0.2.1
 
 - 新增 `trigger.mode = "random_llm"` 与 `mimo_voice_say` 工具：随机抽签 + 模型主动请求双触发。
 - 合成前清洗文本（表情、引号、波浪号、省略号、重复标点），并补 `style_instruction` 压住音高漂移。
-- 硬化：空音频/过短音频判定、超时不再重试、可重试错误指数退避、建连超时独立、
-  并发满直接发文字不排队、参考音频路径限制在插件目录内、工具加 `visibility`。
+- 硬化：空音频 / 过短音频判定、超时不再重试、可重试错误指数退避、建连超时独立、并发满直接发文字不排队、参考音频路径限制在插件目录内、工具加 `visibility`。
 
 ### 0.2.0
 
 - 首个发布版本。
 
-## 隐私
+## 开发
 
-参考音频只保存在本地插件目录（使用 ffmpeg 参考策略时，处理结果缓存在宿主提供的 runtime 目录下的
-`reference-cache/`，拿不到时退回插件目录），
+```bash
+# 语法与配置校验
+python -m py_compile plugin.py
+python -c "import tomllib; tomllib.load(open('config.example.toml','rb'))"
+```
 
-除了随请求发给你配置的 TTS 服务（当前实现为小米 MiMo 官方 API：待合成文本与参考音频会发往 `api.xiaomimimo.com`）外，不会上传到任何地方。
+部署到运行中的麦麦（示例：NAS 上的容器）：
 
-`mimo.api_base_url` 决定请求发往哪里，请只填写可信地址（默认即官方接口）；把它指向内网或本机地址，
-插件会把待合成文本与参考音频发过去。
+```bash
+tar czf /tmp/mv.tgz plugin.py config.example.toml _manifest.json README.md
+scp /tmp/mv.tgz user@nas:/tmp/
+ssh user@nas 'cd <插件目录> && tar xzf /tmp/mv.tgz && sudo chown -R 1000:1000 .'
+```
+
+插件目录里的文件被改动后，麦麦的文件监视会自动重载扩展插件；`plugin.py` 的语法错误会让**所有**扩展插件一起停摆，改完务必先本地 `py_compile`。
+
+回滚：`git checkout <上个版本> -- plugin.py` 后重新铺文件即可；配置项只增不减，旧配置一般无需改。
 
 ## License
 
