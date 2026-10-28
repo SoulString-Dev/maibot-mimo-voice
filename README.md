@@ -43,12 +43,23 @@
 |---|---|---|
 | `bingtang` | 冰糖（默认） | MiMo 预置女声，按「升 12% 音高 + 22% 总语速」生成，约 2.9 秒参考 |
 | `jasmine` | 茉莉 | 比冰糖略低、更柔和一些，约 3.2 秒参考 |
-| `custom` | 自定义 | 用 `voice.reference_path` 指向插件目录内的参考音频 |
+| `custom` | 自定义 | 用 `voice.reference_path` 指向你自己的参考音频（放插件数据目录的 `references/` 下） |
 
 两套内置参考都是**合成音色**（不是真人录音），随插件分发。
 生成方式：先用 MiMo 预置音色生成原始采样，再跑 `tools/build_reference.sh`（升调 1.12、`atempo` 1.08、裁首尾静音）。
 
 ## 换成自己的声音
+
+自己的参考音频请放在**插件数据目录**的 `references/` 下，和插件代码分开放，升级插件不会覆盖：
+
+```
+data/plugins/github.SoulString-Dev.maibot-mimo-voice/
+└── references/
+    └── 我的音色.wav
+```
+
+目录不存在时插件会自动创建，启动日志里也会打印完整路径（`参考音频目录：…`）。
+`voice.reference_path` 只写文件名即可（为兼容旧版本，放在插件根目录也仍能读到）。
 
 推荐在**宿主机**上做，不用进容器：
 
@@ -61,12 +72,12 @@ ffmpeg -i source.wav -af "aresample=24000,asetrate=24000*1.12,aresample=24000,at
 > 实测：参考音频升调后，克隆输出会跟着抬高（1.06× 参考 → 输出约 1.05×），
 > 所以"预设音色 → 升调提速 → 当参考"只需做一次。
 
-把文件放进插件目录，配置改成：
+把文件放进 `references/`（上面那个目录），配置改成：
 
 ```toml
 [voice]
 preset = "custom"
-reference_path = "reference.wav"
+reference_path = "我的音色.wav"
 ```
 
 `tools/build_reference.sh` 是上面命令的封装，额外做了首尾静音裁剪与 20ms 淡入淡出。
@@ -116,7 +127,7 @@ private_mode = "all"
 | `voice.style_instruction` | 见模板 | 随请求发送的朗读风格指令，留空则不发 |
 | `delivery.fallback_to_text` | `true` | 合成失败 / 超时时发文字还是拦截 |
 | `delivery.skip_when_busy` | `true` | 并发路数占满时直接发文字，不排队 |
-| `delivery.timbre_match` | `false` | 音色对齐：按参考音频的频谱补偿每条输出（需要 WAV 参考） |
+| `delivery.timbre_match` | `true` | 音色对齐：按参考音频的频谱补偿每条输出（需要 WAV 参考，默认开） |
 | `delivery.timbre_match_strength` | `1.0` | 音色对齐强度 0–1，补偿量始终限制在 ±6 dB |
 
 ### 进阶
@@ -132,7 +143,7 @@ private_mode = "all"
 | `mimo.retry_on_timeout` | `true` | 单次合成超时后换一次请求重来（只重试一次） |
 | `mimo.retry_backoff_seconds` | `1.5` | 重试退避基数，按 2 的幂增长 |
 | `mimo.connect_timeout` | `10.0` | 建连超时（秒），与整体超时分开 |
-| `voice.reference_path` | `reference.wav` | 仅 `preset = custom` 时生效，必须在插件目录内 |
+| `voice.reference_path` | `reference.wav` | 仅 `preset = custom` 时生效，填 `references/` 下的文件名 |
 | `voice.reference_strategy` | `single_file` | 需要 ffmpeg 的策略：`best_single` / `balanced` / `full_merge` |
 | `trigger.decision_ttl` | `10.0` | 判定有效期（秒） |
 | `trigger.overflow_policy` | `text` | 超长时：`text` 保留文字；`truncate` 截断后合成 |
@@ -196,12 +207,17 @@ private_mode = "all"
 
 ### 0.4.0
 
-- 新增 `delivery.timbre_match`（默认关闭）：按参考音频的相对频谱补偿每条输出的 EQ。
+- 新增 `delivery.timbre_match`（**默认开启**）：按参考音频的相对频谱补偿每条输出的 EQ。
   实测同一句话多次合成时，与参考的频谱距离可从 4–6.5 dB 降到 1.6–2.2 dB，听感更贴参考；
   男声/亮音色收益最大，带混响的参考收益最小。
 - 开启后会向 MiMo 请求 WAV，并用 numpy 做 STFT 补偿（参考音频需为 16-bit WAV）；
   没有 numpy 或参考不是 WAV 时自动按关闭处理并打一条警告。
 - 补偿量固定限制在 ±6 dB，强度可用 `timbre_match_strength` 调；不做任何响度提升。
+- 自定义参考音频改放**插件数据目录**的 `references/`（插件会自动创建，启动日志打印路径），
+  与插件代码分开，升级不再覆盖；为兼容旧版本，放在插件根目录也仍然能读到。
+- 配置模板改成逐节中文说明（每节先说"这一节管什么"，每个字段写清取值/默认/建议）。
+- 修正 manifest 的 `sdk.max_version`（`2.99.99` → `2.12.99`）：旧值被插件索引的版本校验拒绝，
+  导致 0.3.1 一直进不了商店。
 
 ### 0.3.1
 
@@ -250,6 +266,9 @@ ssh user@nas 'cd <插件目录> && tar xzf /tmp/mv.tgz && sudo chown -R 1000:100
 ```
 
 插件目录里的文件被改动后，麦麦的文件监视会自动重载扩展插件；`plugin.py` 的语法错误会让**所有**扩展插件一起停摆，改完务必先本地 `py_compile`。
+
+仓库里只提交两套内置音色（`reference-bingtang.wav` / `reference-jasmine.wav`，白名单放行）；
+你自己的参考音频和 `references/`、`voices/` 都已被 `.gitignore` 排除，不会被误提交。
 
 回滚：`git checkout <上个版本> -- plugin.py` 后重新铺文件即可；配置项只增不减，旧配置一般无需改。
 

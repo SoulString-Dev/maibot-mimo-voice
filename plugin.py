@@ -241,8 +241,8 @@ class DeliveryConfig(PluginConfigBase):
         description="并发已满时直接发文字（True），或排队等待（False，可能把整条回复拖到超时）",
     )
     timbre_match: bool = Field(
-        default=False,
-        description="音色对齐：按参考音频的频谱补偿每条输出，每次合成的音色更接近参考（默认关闭）",
+        default=True,
+        description="音色对齐：按参考音频的频谱补偿每条输出，让每次合成的音色更接近参考（默认开启）",
     )
     timbre_match_strength: float = Field(
         default=1.0,
@@ -404,6 +404,12 @@ class MiMoVoicePlugin(MaiBotPlugin):
         self._synthesis_slots = asyncio.Semaphore(max(1, int(self.config.mimo.max_concurrent)))
         if not self.config.mimo.api_key.strip():
             self.ctx.logger.warning("MiMo 语音插件未配置 api_key，所有回复将保持文字")
+        data_dir = self._data_dir()
+        if data_dir is not None:
+            try:
+                (data_dir / "references").mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                self.ctx.logger.warning("无法创建参考音频目录 %s：%s", data_dir / "references", exc)
         strategy = self.config.voice.reference_strategy
         self.ctx.logger.info(
             "MiMo 语音插件已加载：音色=%s, mode=%s, probability=%.2f, 短句上限=%d字, 合成=%s, "
@@ -422,6 +428,8 @@ class MiMoVoicePlugin(MaiBotPlugin):
             self.config.filters.group_mode,
             self.config.filters.private_mode,
         )
+        if data_dir is not None:
+            self.ctx.logger.info("参考音频目录：%s（自定义音色把文件放这里）", data_dir / "references")
 
     async def on_unload(self) -> None:
         await self._close_session()
@@ -451,35 +459,72 @@ class MiMoVoicePlugin(MaiBotPlugin):
     def _plugin_dir(self) -> Path:
         return Path(__file__).resolve().parent
 
-    def _resolve_path(self, raw: str) -> Path:
-        path = Path(raw).expanduser()
-        return path if path.is_absolute() else (self._plugin_dir() / path)
-
-    def _resolve_inside_plugin(self, raw: str, default_name: str, label: str) -> Path:
-        """把配置里的路径限制在插件目录内，越界时退回默认文件，避免读到插件目录外的内容。"""
-        plugin_dir = self._plugin_dir().resolve()
-        resolved = self._resolve_path(raw).resolve()
+    def _data_dir(self) -> Optional[Path]:
+        """插件数据目录（宿主注入，通常是 data/plugins/<插件 id>）；取不到时返回 None。"""
+        paths = getattr(self.ctx, "paths", None)
+        raw = getattr(paths, "data_dir", None)
+        if not raw:
+            return None
         try:
-            resolved.relative_to(plugin_dir)
-            return resolved
-        except ValueError:
-            self.ctx.logger.warning("%s 指向插件目录之外（%s），已回退为默认的 %s", label, resolved, default_name)
-            return (plugin_dir / default_name).resolve()
+            return Path(raw).expanduser().resolve()
+        except (OSError, ValueError):
+            return None
+
+    def _user_roots(self) -> List[Path]:
+        """用户素材的查找顺序：数据目录 references/ → 数据目录 → 插件目录（兼容旧布局）。"""
+        roots: List[Path] = []
+        data_dir = self._data_dir()
+        if data_dir is not None:
+            roots.append(data_dir / "references")
+            roots.append(data_dir)
+        roots.append(self._plugin_dir())
+        return roots
+
+    def _locate_user_file(self, raw: str, default_name: str, label: str) -> Path:
+        """在用户素材目录里找文件；只接受相对路径，越界或找不到时给出可预期的落点。"""
+        name = (raw or "").strip() or default_name
+        parts = Path(name).parts
+        if Path(name).is_absolute() or ".." in parts:
+            self.ctx.logger.warning("%s 只接受相对路径（%s），已回退为默认的 %s", label, name, default_name)
+            name = default_name
+        fallback: Optional[Path] = None
+        for root in self._user_roots():
+            root = root.resolve()
+            candidate = (root / name).resolve()
+            try:
+                candidate.relative_to(root)
+            except ValueError:
+                continue
+            if fallback is None:
+                fallback = candidate
+            if candidate.is_file():
+                return candidate
+        return fallback or (self._plugin_dir() / default_name).resolve()
+
+    def _preset_path(self, preset_file: str) -> Optional[Path]:
+        """内置音色文件：随插件分发（插件目录），也允许在数据目录覆盖。"""
+        for root in self._user_roots():
+            candidate = (root / preset_file).resolve()
+            if candidate.is_file():
+                return candidate
+        return None
 
     def _reference_path(self) -> Path:
         """解析当前要用的参考音频：内置预设优先，找不到再退回 voice.reference_path。"""
         preset = str(getattr(self.config.voice, "preset", "custom") or "custom").strip().lower()
         preset_file = PRESET_REFERENCE_FILES.get(preset)
         if preset_file:
-            plugin_dir = self._plugin_dir().resolve()
-            candidate = (plugin_dir / preset_file).resolve()
-            if candidate.is_file():
+            candidate = self._preset_path(preset_file)
+            if candidate is not None:
                 return candidate
-            self.ctx.logger.warning("内置音色 %s 的参考音频缺失（%s），回退到 voice.reference_path", preset, candidate)
-        return self._resolve_inside_plugin(self.config.voice.reference_path, "reference.wav", "voice.reference_path")
+            self.ctx.logger.warning("内置音色 %s 的参考音频缺失（%s），回退到 voice.reference_path", preset, preset_file)
+        return self._locate_user_file(self.config.voice.reference_path, "reference.wav", "voice.reference_path")
 
     def _voice_dir(self) -> Path:
-        return self._resolve_inside_plugin("voices", "voices", "voices/")
+        data_dir = self._data_dir()
+        if data_dir is not None and (data_dir / "voices").is_dir():
+            return (data_dir / "voices").resolve()
+        return (self._plugin_dir() / "voices").resolve()
 
     def _audio_files(self) -> List[Path]:
         directory = self._voice_dir()

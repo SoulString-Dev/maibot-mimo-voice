@@ -4,6 +4,11 @@
 __pycache__/
 config.toml
 config_back/
-reference.mp3
-reference.wav
 voices/
+references/
+
+# 用户自备的音频不进仓库；内置音色用白名单放行
+*.wav
+*.mp3
+!reference-bingtang.wav
+!reference-jasmine.wav
