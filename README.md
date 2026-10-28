@@ -16,7 +16,7 @@
 | 与上游的差异 | 原因 |
 |---|---|
 | 内置冰糖 / 茉莉两套参考音频，`voice.preset` 一键切换 | 自带的克隆样本不具普适性；开箱就能出声，想定制再换 `custom` |
-| 默认 `random` + `probability = 0.05` + 短句门槛 60 字 | 全量转语音太激进；语音集中在短句上更像真人插话 |
+| 默认 `random` + `probability = 0.05` + 短句门槛 60 字 | 全量转语音太激进；语音集中在短句上更像真人插话。实际使用建议把概率调到 **0.15 以上**，0.05 时语音出现得太少、几乎察觉不到 |
 | `random_llm` 双触发：随机抽签 + 模型可调 `mimo_voice_say` 主动要语音 | 群友想听声音时能立刻出声，日常仍由概率控制频率 |
 | 支持群聊 / 私聊 `all / whitelist / blacklist` | 灰度上线时可以先只在指定群或私聊里出声 |
 | 参考音频支持固定单文件，也保留 `best_single / balanced / full_merge` | 单文件不需要 ffmpeg；需要自动挑选 / 拼接时仍可用原策略 |
@@ -81,6 +81,7 @@ reference_path = "reference.wav"
 | `voice_only` | 全部转语音（仍受 `max_text_length` 与放行策略约束） |
 
 - 同一聊天流在 `trigger.decision_ttl`（默认 10 秒）内复用上一次的抽签结果，避免连发多条时概率失真。
+- **概率建议 ≥ 0.15**：0.05 这种低概率下，一条聊天流平均要十几二十条回复才轮到一次语音，实际体感接近"不会说话"；0.15 左右才比较明显地能听出来她在用语音。
 - 两种模型工具只在对应模式下暴露，其它模式自动隐藏，防止误调。
 - `random_requires_chinese = true`（默认）时，随机抽中的那条如果清洗后仍含英文字母，就直接发文字——`token`、`LLM` 这类会被逐字母念出来。模型主动请求的语音、`llm_trigger`、`voice_only` 不受此限制。
 
@@ -107,7 +108,7 @@ private_mode = "all"
 | `mimo.api_key` | 空 | MiMo 官方 API Key |
 | `voice.preset` | `bingtang` | 音色：`bingtang` / `jasmine` / `custom` |
 | `trigger.mode` | `random` | 见「触发方式」 |
-| `trigger.probability` | `0.05` | `random` / `random_llm` 模式下每条回复转语音的概率 |
+| `trigger.probability` | `0.05` | `random` / `random_llm` 模式下每条回复转语音的概率。默认值偏保守，**建议 0.15 以上**，否则触发频率低到基本感知不到 |
 | `trigger.short_reply_max_chars` | `60` | 随机转语音的字数门槛（0 = 不限制）；模型主动请求不受限 |
 | `general.max_text_length` | `300` | 单条语音最多念多少字，超出按 `overflow_policy` 处理 |
 | `general.timeout` | `20.0` | 单次合成超时（秒），超时不重试 |
