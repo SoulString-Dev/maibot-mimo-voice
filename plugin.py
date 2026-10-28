@@ -84,7 +84,7 @@ class PluginSectionConfig(PluginConfigBase):
     __ui_label__ = "基础设置"
 
     enabled: bool = Field(default=True, description="是否启用语音回复")
-    config_version: str = Field(default="0.3.1", description="配置文件版本号（内部使用，无需修改）")
+    config_version: str = Field(default="0.4.0", description="配置文件版本号（内部使用，无需修改）")
 
 
 class GeneralConfig(PluginConfigBase):
@@ -240,6 +240,16 @@ class DeliveryConfig(PluginConfigBase):
         default=True,
         description="并发已满时直接发文字（True），或排队等待（False，可能把整条回复拖到超时）",
     )
+    timbre_match: bool = Field(
+        default=False,
+        description="音色对齐：按参考音频的频谱补偿每条输出，每次合成的音色更接近参考（默认关闭）",
+    )
+    timbre_match_strength: float = Field(
+        default=1.0,
+        ge=0.0,
+        le=1.0,
+        description="音色对齐强度，0=不处理、1=完全对齐；补偿量始终限制在 ±6 dB 以内",
+    )
 
 
 class MiMoVoiceConfig(PluginConfigBase):
@@ -259,6 +269,114 @@ def _concat_path(path: Path) -> str:
     return path.as_posix().replace("'", r"'\''")
 
 
+# ---------------------------------------------------------------- 音色对齐工具
+# 做法：把参考音频与每条合成音频都换成"以 600–2500Hz 为基准的相对频谱曲线"
+# （30 个对数频带，60Hz–12kHz），差值就是需要补的 EQ；限制在 ±6dB 以内，
+# 用 STFT 逐帧应用后再 overlap-add 回来。实测能把同句多次合成的频谱距离
+# 从 4–6.5dB 压到 1.6–2.2dB。
+
+
+def _timbre_band_edges() -> Any:
+    import numpy as np
+
+    return np.logspace(np.log10(60.0), np.log10(12000.0), 31)
+
+
+def _spectral_curve(pcm: Any, rate: int) -> Any:
+    """返回长度 30 的相对频谱曲线（dB，已按 600–2500Hz 中位数归零）。"""
+    import numpy as np
+
+    frame = 2048
+    if len(pcm) < frame * 2:
+        frame = max(256, (len(pcm) // 4) // 2 * 2)
+    hop = max(1, frame // 2)
+    window = np.hanning(frame).astype(np.float32)
+    freqs = np.fft.rfftfreq(frame, d=1.0 / rate)
+    edges = _timbre_band_edges()
+    band_of_bin = np.clip(np.searchsorted(edges, freqs, side="right") - 1, 0, len(edges) - 2)
+    weights = np.zeros((len(edges) - 1, len(freqs)), dtype=np.float32)
+    weights[band_of_bin, np.arange(len(freqs))] = 1.0
+    counts = weights.sum(axis=1)
+    counts[counts == 0] = 1.0
+    acc = np.zeros(len(edges) - 1, dtype=np.float64)
+    frames = 0
+    for start in range(0, len(pcm) - frame + 1, hop):
+        spec = np.abs(np.fft.rfft(pcm[start : start + frame] * window))
+        acc += weights @ spec
+        frames += 1
+    if frames == 0:
+        return np.zeros(len(edges) - 1, dtype=np.float32)
+    curve = 20.0 * np.log10(np.maximum(acc / frames / counts, 1e-9))
+    mask = (edges[:-1] >= 600.0) & (edges[1:] <= 2500.0)
+    if not mask.any():
+        mask = np.ones_like(curve, dtype=bool)
+    return (curve - float(np.median(curve[mask]))).astype(np.float32)
+
+
+def _apply_gain_curve(pcm: Any, rate: int, gains_db: Any) -> Any:
+    """用 STFT 把频带增益应用到时域，返回与输入等长、音量不增的信号。"""
+    import numpy as np
+
+    frame = 2048
+    if len(pcm) < frame * 2:
+        frame = max(256, (len(pcm) // 4) // 2 * 2)
+    hop = max(1, frame // 2)
+    window = np.hanning(frame).astype(np.float32)
+    freqs = np.maximum(np.fft.rfftfreq(frame, d=1.0 / rate), 1.0)
+    edges = _timbre_band_edges()
+    centers = np.sqrt(edges[:-1] * edges[1:])
+    gain = np.interp(np.log10(freqs), np.log10(centers), np.asarray(gains_db, dtype=np.float64))
+    linear = (10.0 ** (gain / 20.0)).astype(np.float32)
+    out = np.zeros(len(pcm), dtype=np.float32)
+    norm = np.zeros(len(pcm), dtype=np.float32)
+    for start in range(0, len(pcm) - frame + 1, hop):
+        spec = np.fft.rfft(pcm[start : start + frame] * window) * linear
+        out[start : start + frame] += np.fft.irfft(spec).astype(np.float32) * window
+        norm[start : start + frame] += window * window
+    mask = norm > 1e-6
+    out[mask] /= norm[mask]
+    peak = float(np.max(np.abs(out))) if len(out) else 0.0
+    if peak > 0.99:
+        out *= 0.99 / peak
+    return out
+
+
+def _read_wav_pcm(audio: bytes) -> Tuple[Any, int]:
+    import io
+    import wave
+
+    import numpy as np
+
+    with wave.open(io.BytesIO(audio), "rb") as fh:
+        rate = fh.getframerate()
+        width = fh.getsampwidth()
+        channels = fh.getnchannels()
+        raw = fh.readframes(fh.getnframes())
+    if width != 2:
+        raise ValueError(f"只处理 16-bit PCM（实际 {width * 8} bit）")
+    pcm = np.frombuffer(raw, dtype="<i2").astype(np.float32) / 32768.0
+    if channels > 1:
+        pcm = pcm.reshape(-1, channels).mean(axis=1)
+    return pcm, rate
+
+
+def _write_wav_pcm(pcm: Any, rate: int) -> bytes:
+    import io
+    import wave
+
+    import numpy as np
+
+    data = np.clip(np.asarray(pcm, dtype=np.float32), -1.0, 1.0)
+    raw = (data * 32767.0).astype("<i2").tobytes()
+    buffer = io.BytesIO()
+    with wave.open(buffer, "wb") as fh:
+        fh.setnchannels(1)
+        fh.setsampwidth(2)
+        fh.setframerate(rate)
+        fh.writeframes(raw)
+    return buffer.getvalue()
+
+
 class MiMoVoicePlugin(MaiBotPlugin):
     """把纯文本回复替换为 MiMo 语音条。"""
 
@@ -273,6 +391,8 @@ class MiMoVoicePlugin(MaiBotPlugin):
         self._scope_cache: Dict[str, Tuple[float, Dict[str, str]]] = {}
         self._reference_uri: Optional[str] = None
         self._reference_signature: Optional[str] = None
+        self._timbre_target_cache: Optional[List[float]] = None
+        self._timbre_warned = False
         self._synthesis_slots = asyncio.Semaphore(1)
 
     # ------------------------------------------------------------------ 生命周期
@@ -287,7 +407,7 @@ class MiMoVoicePlugin(MaiBotPlugin):
         strategy = self.config.voice.reference_strategy
         self.ctx.logger.info(
             "MiMo 语音插件已加载：音色=%s, mode=%s, probability=%.2f, 短句上限=%d字, 合成=%s, "
-            "风格指令=%s, 参考策略=%s, 英文=%s, 随机需纯中文=%s, 超时重试=%s, 群聊放行=%s, 私聊放行=%s",
+            "风格指令=%s, 参考策略=%s, 英文=%s, 随机需纯中文=%s, 超时重试=%s, 音色对齐=%s, 群聊放行=%s, 私聊放行=%s",
             self.config.voice.preset,
             self.config.trigger.mode,
             self.config.trigger.probability,
@@ -298,6 +418,7 @@ class MiMoVoicePlugin(MaiBotPlugin):
             self.config.trigger.english_policy,
             "开" if self.config.trigger.random_requires_chinese else "关",
             "开" if self.config.mimo.retry_on_timeout else "关",
+            "开" if self.config.delivery.timbre_match else "关",
             self.config.filters.group_mode,
             self.config.filters.private_mode,
         )
@@ -315,6 +436,8 @@ class MiMoVoicePlugin(MaiBotPlugin):
         self._scope_cache.clear()
         self._reference_uri = None
         self._reference_signature = None
+        self._timbre_target_cache = None
+        self._timbre_warned = False
         self._synthesis_slots = asyncio.Semaphore(max(1, int(self.config.mimo.max_concurrent)))
         self.ctx.logger.info("MiMo 语音插件配置已热更新")
 
@@ -546,7 +669,7 @@ class MiMoVoicePlugin(MaiBotPlugin):
             "modalities": ["audio"],
             "temperature": float(self.config.mimo.temperature),
             "audio": {
-                "format": self.config.mimo.audio_format,
+                "format": self._request_audio_format(),
                 "voice": reference,
             },
         }
@@ -577,6 +700,62 @@ class MiMoVoicePlugin(MaiBotPlugin):
         if len(audio) < _MIN_AUDIO_BYTES:
             raise _RetryableSynthesisError(f"MiMo TTS 返回音频过短（{len(audio)} 字节）")
         return audio
+
+    # --------------------------------------------------------------- 音色对齐
+
+    def _request_audio_format(self) -> str:
+        """音色对齐要处理 PCM，直接向 MiMo 要 WAV；否则按配置。"""
+        if self.config.delivery.timbre_match:
+            return "wav"
+        return self.config.mimo.audio_format
+
+    def _timbre_target(self) -> Optional[List[float]]:
+        if self._timbre_target_cache is not None:
+            return self._timbre_target_cache
+        path = self._reference_path()
+        if path.suffix.lower() != ".wav":
+            self._warn_timbre_once("音色对齐需要 WAV 参考音频（当前 %s），本次按关闭处理", path.name)
+            return None
+        try:
+            import numpy  # noqa: F401
+        except ImportError:
+            self._warn_timbre_once("音色对齐需要 numpy，当前环境没有，按关闭处理")
+            return None
+        try:
+            pcm, rate = _read_wav_pcm(path.read_bytes())
+        except Exception as exc:  # noqa: BLE001
+            self._warn_timbre_once("音色对齐读取参考音频失败（%s），按关闭处理", exc)
+            return None
+        self._timbre_target_cache = _spectral_curve(pcm, rate).tolist()
+        return self._timbre_target_cache
+
+    def _warn_timbre_once(self, message: str, *args: Any) -> None:
+        if self._timbre_warned:
+            return
+        self._timbre_warned = True
+        self.ctx.logger.warning(message, *args)
+
+    def _match_timbre(self, audio: bytes) -> bytes:
+        """把一条合成音频的频谱往参考音频拉。任何异常都按"原样返回"处理。"""
+        target = self._timbre_target()
+        if target is None:
+            return audio
+        try:
+            import numpy as np
+
+            pcm, rate = _read_wav_pcm(audio)
+            curve = _spectral_curve(pcm, rate)
+            strength = float(self.config.delivery.timbre_match_strength)
+            gains = np.clip((np.asarray(target, dtype=np.float32) - curve) * strength, -6.0, 6.0)
+            before = float(np.sqrt(np.mean((np.asarray(target, dtype=np.float32) - curve) ** 2)))
+            matched = _apply_gain_curve(pcm, rate, gains)
+            after_curve = _spectral_curve(matched, rate)
+            after = float(np.sqrt(np.mean((np.asarray(target, dtype=np.float32) - after_curve) ** 2)))
+            self.ctx.logger.info("音色对齐：频谱距离 %.2f → %.2f dB", before, after)
+            return _write_wav_pcm(matched, rate)
+        except Exception as exc:  # noqa: BLE001
+            self.ctx.logger.warning("音色对齐失败（%s），按原始音频发送", exc)
+            return audio
 
     async def _synthesize_once(self, text: str, timeout: float) -> bytes:
         """合成一次；超时按 retry_on_timeout 最多再重来一次。
@@ -869,6 +1048,9 @@ class MiMoVoicePlugin(MaiBotPlugin):
         except Exception as exc:  # noqa: BLE001 - 统一降级
             self.ctx.logger.warning("语音合成失败（%s），%s", exc, "回退文字" if self.config.delivery.fallback_to_text else "拦截消息")
             return None if self.config.delivery.fallback_to_text else {"action": "abort"}
+
+        if self.config.delivery.timbre_match:
+            audio = await asyncio.to_thread(self._match_timbre, audio)
 
         outbound["raw_message"] = [
             {

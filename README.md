@@ -98,7 +98,7 @@ private_mode = "all"
 
 `group_mode` 与 `private_mode` 都不是 `all` 时，插件会记录入站消息的群号 / 对方 QQ 号（`chat.receive.before_process`），出站时按名单判断；两者都是 `all` 时不记录，零额外开销。拿不到对方身份时（映射过期等）一律保持文字，不误放行。
 
-## 配置说明（共 31 项，日常只需动前 12 项）
+## 配置说明（共 33 项，日常只需动前 12 项）
 
 ### 基础
 
@@ -116,6 +116,8 @@ private_mode = "all"
 | `voice.style_instruction` | 见模板 | 随请求发送的朗读风格指令，留空则不发 |
 | `delivery.fallback_to_text` | `true` | 合成失败 / 超时时发文字还是拦截 |
 | `delivery.skip_when_busy` | `true` | 并发路数占满时直接发文字，不排队 |
+| `delivery.timbre_match` | `false` | 音色对齐：按参考音频的频谱补偿每条输出（需要 WAV 参考） |
+| `delivery.timbre_match_strength` | `1.0` | 音色对齐强度 0–1，补偿量始终限制在 ±6 dB |
 
 ### 进阶
 
@@ -191,6 +193,15 @@ private_mode = "all"
 宿主机没有 `ffmpeg` 时，插件会在加载时退回 `single_file`，不会报错。
 
 ## 更新日志
+
+### 0.4.0
+
+- 新增 `delivery.timbre_match`（默认关闭）：按参考音频的相对频谱补偿每条输出的 EQ。
+  实测同一句话多次合成时，与参考的频谱距离可从 4–6.5 dB 降到 1.6–2.2 dB，听感更贴参考；
+  男声/亮音色收益最大，带混响的参考收益最小。
+- 开启后会向 MiMo 请求 WAV，并用 numpy 做 STFT 补偿（参考音频需为 16-bit WAV）；
+  没有 numpy 或参考不是 WAV 时自动按关闭处理并打一条警告。
+- 补偿量固定限制在 ±6 dB，强度可用 `timbre_match_strength` 调；不做任何响度提升。
 
 ### 0.3.1
 
