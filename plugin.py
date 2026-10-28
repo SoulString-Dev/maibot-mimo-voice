@@ -2,7 +2,7 @@
 
 设计要点：
 - 合成走 MiMo 官方 `mimo-v2.5-tts-voiceclone`，参考音频固定、可预先用 ffmpeg 升调提速；
-- 默认策略是“少量、短句”（`trigger.mode = "random"`，`probability = 0.05`，短句上限 60 字）；
+- 默认策略是“少量、短句”（`trigger.mode = "random"`，`probability = 0.15`，短句上限 60 字）；
 - `trigger.mode = "random_llm"` 时随机抽签与模型主动请求并行：模型可以调 `mimo_voice_say`
   指定某轮用语音，随机抽签保证日常仍有一定出现频率；
 - 合成前会对文本做一次朗读清洗（去表情/引号/波浪号/省略号，补齐句末标点），
@@ -116,7 +116,12 @@ class TriggerConfig(PluginConfigBase):
         description="random=按概率转语音；random_llm=概率抽签 + 模型主动请求（mimo_voice_say）；"
         "llm_trigger=语音优先、LLM 判断内容更适合文字时改文字；voice_only=所有纯文本都转语音",
     )
-    probability: float = Field(default=0.05, ge=0.0, le=1.0, description="random / random_llm 模式下，每条回复转语音的概率")
+    probability: float = Field(
+        default=0.15,
+        ge=0.0,
+        le=1.0,
+        description="random / random_llm 模式下，每条回复转语音的概率；建议 0.15 以上，低于 0.1 几乎感知不到",
+    )
     decision_ttl: float = Field(
         default=10.0,
         ge=0.0,

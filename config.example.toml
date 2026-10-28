@@ -65,8 +65,9 @@ reference_strategy = "single_file"
 #   llm_trigger 语音优先，模型判断更适合文字时调 mimo_voice_text_reply
 #   voice_only  所有纯文本回复都转语音
 mode = "random"
-# 随机概率（滑块 0–1）：0.05 = 约 5% 的回复变语音
-probability = 0.05
+# 随机概率（滑块 0–1）：0.15 = 约 15% 的回复变语音（之后还会被短句门槛、英文过滤再筛掉一些）
+# 低于 0.1 时语音出现得太少，实际体感接近"不会说话"
+probability = 0.15
 # 判定有效期（秒，0–300）：同一聊天流在这段时间内复用上一次的抽签/模型选择结果
 # 默认 10：连发几条时不会一会儿语音一会儿文字
 decision_ttl = 10.0
