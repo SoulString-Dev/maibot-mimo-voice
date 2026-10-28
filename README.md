@@ -91,7 +91,7 @@ reference_path = "reference.wav"
 ```toml
 [filters]
 group_mode = "whitelist"
-group_ids = ["589957759"]
+group_ids = ["123456789"]
 private_mode = "all"
 ```
 
@@ -176,6 +176,19 @@ private_mode = "all"
 
 除了随请求发给你配置的 TTS 服务（当前实现为小米 MiMo 官方 API：待合成文本与参考音频会发往 `api.xiaomimimo.com`）外，不会上传到任何地方。`mimo.api_base_url` 决定请求发往哪里，请只填写可信地址。
 
+## 关于 ffmpeg（可选依赖）
+
+插件默认 `voice.reference_strategy = "single_file"`，**不调用任何外部命令**，所以大多数用户不需要装 ffmpeg。
+
+只有把 `reference_strategy` 改成 `best_single` / `balanced` / `full_merge` 时，才会用宿主机的 `ffmpeg` 对**你自己提供的参考音频**做裁静音 / 截段 / 合并 / 重采样：
+
+- 调用方式是固定参数列表（`subprocess.run([...], check=True)`），不经 shell、不做字符串拼接，也没有任何聊天内容或用户输入拼进命令行；
+- 输入只有 `voices/` 目录下的音频文件和你配置的数值；
+- 不联网、不下载任何东西，只在本机做转码；
+- 处理结果缓存在 runtime 目录的 `reference-cache/`，同一份参考音频只处理一次。
+
+宿主机没有 `ffmpeg` 时，插件会在加载时退回 `single_file`，不会报错。
+
 ## 更新日志
 
 ### 0.3.1
@@ -183,6 +196,7 @@ private_mode = "all"
 - 新增 `mimo.retry_on_timeout`（默认 `true`）：单次合成超过 `general.timeout` 后换一次请求重来，**最多只重试一次**。
 - 依据：线上 27 次实测中，超时的请求大多直接跳到 30 秒以上（30.6 / 31.6 / 35.6 / 63.3 / 163.3 秒），把超时放宽到 30 秒几乎救不回来；而"再给一次机会"按两条独立估能把失败率从约 17% 压到 3–4%，正常时段体感不变。
 - 代价：最坏情况下要等两个超时周期（默认 40 秒）才回退文字。
+- 文档：新增「关于 ffmpeg（可选依赖）」一节，说明 `subprocess` 只出现在可选的参考音频处理策略里，参数固定、不经 shell、不联网。
 
 ### 0.3.0
 

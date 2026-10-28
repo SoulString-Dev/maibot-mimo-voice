@@ -89,9 +89,9 @@ random_requires_chinese = true
 #   blacklist 列表里的对象保持文字，其余转语音
 group_mode = "all"
 private_mode = "all"
-# 群号列表（字符串数组），例：["864688950", "589957759"]
+# 群号列表（字符串数组），例：["987654321", "123456789"]
 group_ids = []
-# 私聊对方 QQ 号列表，例：["215276081"]
+# 私聊对方 QQ 号列表，例：["10000001"]
 private_user_ids = []
 
 [general]

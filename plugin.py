@@ -162,12 +162,12 @@ class FilterConfig(PluginConfigBase):
     group_ids: List[str] = Field(
         default_factory=list,
         description="群号列表（配合 group_mode 使用）",
-        json_schema_extra={"placeholder": "例如: 589957759"},
+        json_schema_extra={"placeholder": "例如: 123456789"},
     )
     private_user_ids: List[str] = Field(
         default_factory=list,
         description="私聊对方的 QQ 号列表（配合 private_mode 使用）",
-        json_schema_extra={"placeholder": "例如: 1132855796"},
+        json_schema_extra={"placeholder": "例如: 10000002"},
     )
 
 
