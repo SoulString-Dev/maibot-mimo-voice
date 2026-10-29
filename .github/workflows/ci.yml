@@ -24,7 +24,7 @@ jobs:
         run: ruff check .
 
       - name: Mypy 类型检查
-        run: mypy plugin.py
+        run: mypy plugin.py core
 
       - name: 单元测试
         run: python tests/run_all.py

@@ -1,6 +1,6 @@
 # 维护手记
 
-> 写给以后还想继续把它做得更好的自己。当前开发版本 **0.5.0**（商店上最新可装 0.4.0）。
+> 写给以后还想继续把它做得更好的自己。当前开发版本 **0.5.1**（商店上最新可装 0.4.0）。
 
 ## 1. 这是什么，在哪
 
@@ -67,13 +67,13 @@ git tag -a vX.Y.Z -m "vX.Y.Z" && git push origin vX.Y.Z   # 版本号必须与 _
 - `PluginConfigBase` 是 `extra="ignore"`：删配置键不会让旧 `config.toml` 报错，宿主会按新 schema 重写。
 - TOML 不能重复声明同一张表，分组只能用注释。
 - hook 可用键：`send_service.before_send`（可改 message / abort）、`send_service.after_send`（`message_id` 已是平台回执）、`maisaka.planner.before_request`（只有 `items`/`tool_definitions`/`session_id`，不能 abort）。
-- **静态检查要装在带 SDK 的环境里跑**：没有 `maibot-plugin-sdk` 时基类会被当成 `Any`，`self.config.xxx` 的字段错误一个都发现不了（CI 第一次跑就因此红过一次）。本地先 `pip install --user "maibot-plugin-sdk>=2.12"` 再跑 `mypy plugin.py`。
+- **静态检查要装在带 SDK 的环境里跑**：没有 `maibot-plugin-sdk` 时基类会被当成 `Any`，`self.config.xxx` 的字段错误一个都发现不了（CI 第一次跑就因此红过一次）。本地先 `pip install --user "maibot-plugin-sdk>=2.12"` 再跑 `mypy plugin.py core`。
 - 出站消息里 `user_info.user_id` 是**机器人自己**；要拿对方 QQ 得在 `chat.receive.before_process` 记 `session_id → 用户`。
 
 ## 5. 部署与验证
 
 ```bash
-tar czf /tmp/mv.tgz plugin.py config.example.toml README.md _manifest.json tools/build_reference.sh
+tar czf /tmp/mv.tgz plugin.py core config.example.toml README.md _manifest.json tools/build_reference.sh
 scp -O -P <ssh端口> /tmp/mv.tgz user@<nas>:/tmp/
 ssh -p <ssh端口> user@<nas> "cd <部署目录> && tar xzf /tmp/mv.tgz && sudo chown -R 1000:1000 ."
 ```
@@ -105,7 +105,7 @@ ssh -p <ssh端口> user@<nas> "cd <部署目录> && tar xzf /tmp/mv.tgz && sudo 
 
 1. **纯 Python 参考音频加工**（彻底去 ffmpeg）：重采样/变调/裁静音/淡入淡出/响度归一，上传即生成多档音高供下拉。
 2. **自适应超时**：按最近 20 次合成的 p80（12–25s）动态设；配合连续 3 次失败熔断。
-3. **文件拆分**：`plugin.py` 已过千行，按 config / audio / text / tts / plugin 拆，作为只拆分、不带功能改动的补丁版本发。
+3. **继续拆分**：`plugin.py` 已经把文案/配置/音频拆进 `core/`（约 1130 行）；下一步是把 TTS 请求与参考音频管理也搬出去，仍作为"只拆分不带功能改动"的补丁版本。
 4. 产品侧：商店页放样音、英文 README。
 5. 已评估**不做**：本地音频缓存、RVC/翻唱（无 GPU）、用提示词管英文（实测无效且会改坏内容）。
 
@@ -118,7 +118,7 @@ ssh -p <ssh端口> user@<nas> "cd <部署目录> && tar xzf /tmp/mv.tgz && sudo 
 ## 附：常用命令
 
 ```bash
-docker exec maim-bot-core /MaiMBot/.venv/bin/python -m py_compile /MaiMBot/plugins/maibot-mimo-voice/plugin.py
+docker exec maim-bot-core /MaiMBot/.venv/bin/python -m py_compile /MaiMBot/plugins/maibot-mimo-voice/plugin.py /MaiMBot/plugins/maibot-mimo-voice/core/*.py
 docker logs maim-bot-core 2>&1 | grep -E "maibot-mimo-voice|扩展插件" | tail -20
 docker exec maim-bot-core sh -c 'grep -h "替换为语音" /MaiMBot/logs/app_*.log.jsonl | tail -5'
 ```

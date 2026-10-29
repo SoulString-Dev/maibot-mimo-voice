@@ -1,15 +1,14 @@
 """MiMo 语音回复插件：把纯文本回复按策略替换成语音条。
 
-设计要点：
-- 合成走 MiMo 官方 `mimo-v2.5-tts-voiceclone`，参考音频固定、可预先用 ffmpeg 升调提速；
-- 默认策略是“少量、短句”（`trigger.mode = "random"`，`probability = 0.15`，短句上限 60 字）；
-- `trigger.mode = "random_llm"` 时随机抽签与模型主动请求并行：模型可以调 `mimo_voice_say`
-  指定某轮用语音，随机抽签保证日常仍有一定出现频率；
-- 合成前会对文本做一次朗读清洗（去表情/引号/波浪号/省略号，补齐句末标点），
-  并把 `voice.style_instruction` 作为 user 消息随请求发送，用来压住音高漂移；
-- 群聊/私聊支持 all / whitelist / blacklist 三种放行模式；
-- 合成超时或失败默认回退为文字，保证消息不丢；
-- 不做音频缓存：同一段文本重复出现的概率极低，缓存命中率不值得维护。
+本文件是插件入口：生命周期、Hook 派发、过滤策略、参考音频管理与合成编排。
+可以复用的纯逻辑拆在同目录的 ``core`` 子包里：
+
+* ``core.constants`` —— 阈值、默认值与参考音频参数
+* ``core.config``    —— 配置模型与 ``api_base_url`` 端点校验
+* ``core.text``      —— 朗读清洗与英文口癖策略
+* ``core.audio``     —— WAV 读写、频谱曲线、音色对齐矩阵
+
+行为说明见 README。
 """
 
 from __future__ import annotations
@@ -19,95 +18,62 @@ import base64
 import copy
 import hashlib
 import io
-import ipaddress
 import json
 import math
 import random
-import re
 import shutil
 import subprocess
 import time
 import wave
 from pathlib import Path
-from typing import Any, Dict, List, Literal, Optional, Tuple, cast
+from typing import Any, Dict, List, Optional, Tuple, cast
 from urllib.parse import urlsplit
 
 import aiohttp
-from maibot_sdk import CONFIG_RELOAD_SCOPE_SELF, Field, HookHandler, MaiBotPlugin, PluginConfigBase, Tool
+from maibot_sdk import CONFIG_RELOAD_SCOPE_SELF, HookHandler, MaiBotPlugin, Tool
 from maibot_sdk.types import ErrorPolicy, HookMode, HookOrder
-from pydantic import model_validator
 
-_NUMPY_MODULE: Any = None
-_NUMPY_TRIED = False
-
-
-def _numpy() -> Any:
-    """按需导入 numpy（可选依赖），失败返回 None 并记住结果。"""
-    global _NUMPY_MODULE, _NUMPY_TRIED
-    if not _NUMPY_TRIED:
-        _NUMPY_TRIED = True
-        try:
-            import numpy
-
-            _NUMPY_MODULE = numpy
-        except ImportError:  # pragma: no cover - 正常安装都有 numpy
-            _NUMPY_MODULE = None
-    return _NUMPY_MODULE
-
-SUPPORTED_REFERENCE_SUFFIXES = {".aac", ".flac", ".m4a", ".mp3", ".mpeg", ".ogg", ".opus", ".wav", ".wma"}
-VOICE_SEGMENT_TYPE = "voice"
-DEFAULT_STYLE_INSTRUCTION = "用同一个人的音色说话，像平时聊天一样语速稍快、句子连贯，不要拖长尾音，情绪自然。"
-_URL_PATTERN = re.compile(r"https?://\S+")
-_CQ_PATTERN = re.compile(r"\[CQ:[^\]]+\]")
-# 表情符号与零宽字符：朗读前必须清掉，否则会被念出来或者把音高带跑。
-_EMOJI_PATTERN = re.compile(
-    "[\U0001F000-\U0001FAFF\U00002600-\U000027BF\U0001F1E6-\U0001F1FF\u2190-\u21FF\u2B00-\u2BFF\ufe0f\u200d]"
+from .core import config as _config
+from .core import text as _text
+from .core.audio import (
+    _apply_gain_curve,
+    _concat_path,
+    _numpy,
+    _read_wav_pcm,
+    _spectral_curve,
+    _stderr_excerpt,
+    _write_wav_pcm,
 )
-_LEAD_NOISE_PATTERN = re.compile(r"^[\s'\"“”‘’「」『』（）()\[\]【】《》<>~～\-—*_`#>、，,。]+")
-_TAIL_NOISE_PATTERN = re.compile(r"[\s'\"“”‘’「」『』（）()\[\]【】《》<>*_`~～\-—、，,]+$")
-_SENTENCE_END = "。！？!?"
-_LATIN_PATTERN = re.compile(r"[A-Za-z]+")
-_VOWELS = "aeiou"
-_CONSONANTS = "bcdfghjklmnpqrstvwxyz"
-# MiMo 侧可重试的 HTTP 状态：超时与 4xx 业务错误不重试，避免把总耗时翻倍。
-_RETRYABLE_STATUS = frozenset({408, 425, 429, 500, 502, 503, 504})
-# 小于这个字节数的 mp3 基本是空音频（约 0.15 秒），按失败处理。
-_MIN_AUDIO_BYTES = 600
-_DEFAULT_API_BASE = "https://api.xiaomimimo.com/v1"
-_MIN_AUDIO_SECONDS = 0.3
-# 音频时长上限不是一个固定值：长文本（llm_trigger / voice_only / 模型点名）本来就该更长。
-# 这里按“中文字符数 × 0.7 秒”估算，下限 _MAX_AUDIO_SECONDS，上限 _AUDIO_SECONDS_CAP。
-_MAX_AUDIO_SECONDS = 20.0
-_AUDIO_SECONDS_CAP = 90.0
-_AUDIO_SECONDS_PER_CHAR = 0.7
-# 各类按会话缓存的上限；超过就整体清空，避免长期运行缓慢泄漏。
-_TTL_CACHE_MAX_ENTRIES = 512
-_MIN_RMS_DBFS = -40.0
-_SILENCE_DBFS = -45.0
-_PEAK_TARGET_DBFS = -1.5
-_PEAK_GAIN_MIN = 0.25
-_PEAK_GAIN_MAX = 4.0
-_TIMBRE_MAX_GAIN_DB = 6.0
-_PEAK_GAIN_EPSILON = 0.01
-_TAIL_KEEP_SECONDS = 0.05
-_CONFIG_WARNINGS: List[str] = []
-_SCOPE_TTL_SECONDS = 12 * 3600.0
-_SCOPE_CACHE_MAX_ENTRIES = 5000
-# 内置音色：随插件分发的标准参考音频（由 MiMo 预置音色按同一套升调/裁剪流程生成）。
-PRESET_REFERENCE_FILES = {
-    "bingtang": "reference-bingtang.wav",
-    "jasmine": "reference-jasmine.wav",
-}
-
-# 下面这些值不做成配置项：改动它们只会把音频搞坏，或者属于接口硬限制。
-_REFERENCE_SAMPLE_RATE = 24000
-_REFERENCE_BITRATE_KBPS = 64
-_REFERENCE_MAX_CLIP_SECONDS = 15.0
-_REFERENCE_BALANCED_CLIP_SECONDS = 3.0
-_REFERENCE_SILENCE_DB = -45.0
-_FFMPEG_BIN = "ffmpeg"
-# MiMo 侧参考音频 Base64 上限约 10MB，留一点余量。
-_REFERENCE_MAX_BYTES = int(9.5 * 1024 * 1024)
+from .core.config import MiMoVoiceConfig
+from .core.constants import (
+    _AUDIO_SECONDS_CAP,
+    _AUDIO_SECONDS_PER_CHAR,
+    _FFMPEG_BIN,
+    _MAX_AUDIO_SECONDS,
+    _MIN_AUDIO_BYTES,
+    _MIN_AUDIO_SECONDS,
+    _MIN_RMS_DBFS,
+    _PEAK_GAIN_EPSILON,
+    _PEAK_GAIN_MAX,
+    _PEAK_GAIN_MIN,
+    _PEAK_TARGET_DBFS,
+    _REFERENCE_BALANCED_CLIP_SECONDS,
+    _REFERENCE_BITRATE_KBPS,
+    _REFERENCE_MAX_BYTES,
+    _REFERENCE_MAX_CLIP_SECONDS,
+    _REFERENCE_SAMPLE_RATE,
+    _REFERENCE_SILENCE_DB,
+    _RETRYABLE_STATUS,
+    _SCOPE_CACHE_MAX_ENTRIES,
+    _SCOPE_TTL_SECONDS,
+    _SILENCE_DBFS,
+    _TAIL_KEEP_SECONDS,
+    _TIMBRE_MAX_GAIN_DB,
+    _TTL_CACHE_MAX_ENTRIES,
+    PRESET_REFERENCE_FILES,
+    SUPPORTED_REFERENCE_SUFFIXES,
+    VOICE_SEGMENT_TYPE,
+)
 
 
 class _RetryableSynthesisError(RuntimeError):
@@ -116,430 +82,6 @@ class _RetryableSynthesisError(RuntimeError):
 
 class _SynthesisBusy(RuntimeError):
     """并发已满，按 delivery.skip_when_busy 直接回退文字。"""
-
-
-
-class PluginSectionConfig(PluginConfigBase):
-    """插件基础开关"""
-
-    __ui_label__ = "基础设置"
-
-    enabled: bool = Field(default=True, description="是否启用语音回复")
-    config_version: str = Field(default="0.5.0", description="配置文件版本号（内部使用，无需修改）")
-
-
-class GeneralConfig(PluginConfigBase):
-    """通用文本与超时设置"""
-
-    __ui_label__ = "通用"
-
-    max_text_length: int = Field(
-        default=300,
-        ge=20,
-        le=1000,
-        description="单条语音可承载的最大文字长度；超长时按 trigger.overflow_policy 处理",
-    )
-    timeout: float = Field(
-        default=20.0,
-        ge=3.0,
-        le=120.0,
-        description="单次语音合成超时（秒）；超时按 delivery.fallback_to_text 处理",
-    )
-
-
-class TriggerConfig(PluginConfigBase):
-    """触发策略"""
-
-    __ui_label__ = "触发策略"
-
-    mode: Literal["random", "random_llm", "llm_trigger", "voice_only"] = Field(
-        default="random",
-        description="random=按概率转语音；random_llm=概率抽签 + 模型主动请求（mimo_voice_say）；"
-        "llm_trigger=语音优先、LLM 判断内容更适合文字时改文字；voice_only=所有纯文本都转语音",
-    )
-    probability: float = Field(
-        default=0.15,
-        ge=0.0,
-        le=1.0,
-        description="random / random_llm 模式下，每条回复转语音的概率；建议 0.15 以上，低于 0.1 几乎感知不到",
-    )
-    decision_ttl: float = Field(
-        default=10.0,
-        ge=0.0,
-        le=300.0,
-        description="判定有效期（秒）：同一条聊天流在这么短时间内复用上一次的抽签/模型选择结果，避免逐条翻来覆去",
-    )
-    short_reply_max_chars: int = Field(
-        default=60,
-        ge=0,
-        le=400,
-        description="短句门槛：超过该字数的回复不转语音，0 表示不限制。只约束随机触发，模型主动要语音不受限",
-    )
-    overflow_policy: Literal["truncate", "text"] = Field(
-        default="text",
-        description="超过 general.max_text_length 时：truncate=截断后合成；text=保留文字不发语音",
-    )
-    english_policy: Literal["keep", "strip_tics", "strip"] = Field(
-        default="strip_tics",
-        description="英文处理：keep=原样念（会把 ww/emmm 读成字母）；"
-        "strip_tics=只删 ww/emmm/ohhhhhhh 这类口癖，保留 LLM/token/cos 等真词；"
-        "strip=删掉所有两个字母以上的拉丁串（会误伤真词，慎用）",
-    )
-    random_requires_chinese: bool = Field(
-        default=True,
-        description="随机触发时，清洗后仍含英文字母的回复改为发文字（避免把 token/LLM 念成字母）；"
-        "模型主动要语音、llm_trigger、voice_only 不受此限制",
-    )
-
-
-class FilterConfig(PluginConfigBase):
-    """群聊 / 私聊放行规则"""
-
-    __ui_label__ = "放行规则"
-
-    group_mode: Literal["all", "whitelist", "blacklist"] = Field(
-        default="all",
-        description="群聊放行方式：all=全部放行；whitelist=仅 group_ids 内的群转语音；blacklist=group_ids 内的群保持文字",
-    )
-    private_mode: Literal["all", "whitelist", "blacklist"] = Field(
-        default="all",
-        description="私聊放行方式：all=全部放行；whitelist=仅 private_user_ids 内的对方转语音；blacklist=private_user_ids 内的对方保持文字",
-    )
-    group_ids: List[str] = Field(
-        default_factory=list,
-        description="群号列表（配合 group_mode 使用）",
-        json_schema_extra={"placeholder": "例如: 123456789"},
-    )
-    private_user_ids: List[str] = Field(
-        default_factory=list,
-        description="私聊对方的 QQ 号列表（配合 private_mode 使用）",
-        json_schema_extra={"placeholder": "例如: 10000002"},
-    )
-
-
-class VoiceConfig(PluginConfigBase):
-    """参考音频与音色"""
-
-    __ui_label__ = "音色"
-
-    preset: Literal["bingtang", "jasmine", "custom"] = Field(
-        default="bingtang",
-        description="音色：bingtang=内置冰糖（偏亮）、jasmine=内置茉莉（偏低偏柔）、custom=用 reference_path 指定的自定义参考音频",
-    )
-    reference_path: str = Field(
-        default="reference.wav",
-        description="自定义参考音频文件名（仅 preset=custom 时生效），必须放在插件目录内",
-        json_schema_extra={"placeholder": "例如: reference.wav"},
-    )
-    reference_strategy: Literal["single_file", "best_single", "balanced", "full_merge"] = Field(
-        default="single_file",
-        description="single_file=直接用一个文件（不需要 ffmpeg）；其余三种需要插件目录下有 ffmpeg，从 voices/ 自动截取或拼接参考音频",
-    )
-    style_instruction: str = Field(
-        default=DEFAULT_STYLE_INSTRUCTION,
-        description="随请求发送的朗读风格指令。它决定语速和语气，改动后听感变化很大；留空表示不发送",
-    )
-
-
-class MiMoConfig(PluginConfigBase):
-    """MiMo 合成参数"""
-
-    __ui_label__ = "合成参数"
-
-    api_key: str = Field(default="", description="MiMo 官方 API Key")
-    api_base_url: str = Field(
-        default=_DEFAULT_API_BASE,
-        description="MiMo API 基础地址，必须是以 https:// 开头的公网地址；写错会自动回退到官方地址",
-    )
-    allow_private_base_url: bool = Field(
-        default=False,
-        description="允许把参考音频发往内网/本机地址（只有自建代理时才需要，打开后会记一条警告）",
-    )
-    model: str = Field(default="mimo-v2.5-tts-voiceclone", description="TTS 模型名")
-    audio_format: Literal["mp3", "wav"] = Field(default="mp3", description="返回音频格式")
-    temperature: float = Field(
-        default=0.15,
-        ge=0.0,
-        le=1.0,
-        description="采样温度：越低音色越稳但可能发闷；实测 0.15 最稳，0.6 以上偶尔会听出换人",
-    )
-    max_concurrent: int = Field(default=1, ge=1, le=4, description="同时合成路数，建议保持 1")
-    retry_attempts: int = Field(
-        default=0,
-        ge=0,
-        le=3,
-        description="仅对 429/5xx/网络错误重试（超时另由 retry_on_timeout 控制）",
-    )
-    retry_on_timeout: bool = Field(
-        default=True,
-        description="单次合成超过 general.timeout 时换一次请求重来（只重试一次，最坏耗时翻倍）",
-    )
-    retry_backoff_seconds: float = Field(default=1.5, ge=0.0, le=10.0, description="重试退避基数（秒），按 2 的幂指数增长")
-    connect_timeout: float = Field(default=10.0, ge=1.0, le=60.0, description="建立连接的超时（秒），与整体超时分开")
-
-    @model_validator(mode="after")
-    def _check_base_url(self) -> "MiMoConfig":
-        cleaned = (self.api_base_url or "").strip() or _DEFAULT_API_BASE
-        problem = _api_base_url_problem(cleaned, allow_private=self.allow_private_base_url)
-        if problem:
-            message = f"mimo.api_base_url 不可用（{problem}），已回退为 {_DEFAULT_API_BASE}"
-            _CONFIG_WARNINGS.append(message)
-            object.__setattr__(self, "api_base_url", _DEFAULT_API_BASE)
-        return self
-
-
-class DeliveryConfig(PluginConfigBase):
-    """发送行为"""
-
-    __ui_label__ = "发送"
-
-    fallback_to_text: bool = Field(default=True, description="合成失败/超时时是否回退发送文字")
-    skip_when_busy: bool = Field(
-        default=True,
-        description="并发已满时直接发文字（True），或排队等待（False，可能把整条回复拖到超时）",
-    )
-    timbre_match: bool = Field(
-        default=True,
-        description="音色对齐：按参考音频的频谱补偿每条输出，让每次合成的音色更接近参考（默认开启）",
-    )
-    timbre_match_strength: float = Field(
-        default=1.0,
-        ge=0.0,
-        le=1.0,
-        description="音色对齐强度，0=不处理、1=完全对齐；补偿量始终限制在 ±6 dB 以内",
-    )
-    trim_tail_silence_ms: int = Field(
-        default=250,
-        ge=0,
-        le=3000,
-        description="尾部静音超过这个毫秒数就裁掉（只留 50ms），0=不裁；实测合成尾部静音 94–474ms 不稳定",
-    )
-    tail_pad_ms: int = Field(
-        default=120,
-        ge=0,
-        le=1000,
-        description="处理完后在尾部补多少毫秒静音，避免播放端把最后一个字吃掉，0=不补",
-    )
-    peak_normalize: bool = Field(
-        default=True,
-        description="把峰值统一拉到 -1.5 dBFS，解决有的条小声有的条刺耳",
-    )
-
-
-def _is_private_host(host: str) -> bool:
-    """判断主机名是否指向本机、内网、链路本地或云元数据地址。"""
-    lowered = (host or "").strip().strip(".").lower()
-    if not lowered:
-        return True
-    if lowered in {"localhost", "localhost.localdomain"} or lowered.endswith(".localhost"):
-        return True
-    try:
-        address = ipaddress.ip_address(lowered)
-    except ValueError:
-        # 不含点的裸主机名（例如 docker 服务名）一律按内网处理
-        return "." not in lowered
-    return bool(
-        address.is_private
-        or address.is_loopback
-        or address.is_link_local
-        or address.is_reserved
-        or address.is_multicast
-        or address.is_unspecified
-    )
-
-
-def _api_base_url_problem(url: str, *, allow_private: bool) -> str:
-    """返回不可用的原因；空字符串表示没问题。"""
-    try:
-        parts = urlsplit(url)
-    except ValueError:
-        return "不是合法的地址"
-    if parts.scheme not in {"http", "https"}:
-        return "不是 http(s) 地址"
-    if parts.scheme == "http" and not allow_private:
-        return "不是 https"
-    host = parts.hostname or ""
-    if not host:
-        return "缺少主机名"
-    if not allow_private and _is_private_host(host):
-        return "指向本机或内网地址"
-    return ""
-
-
-class MiMoVoiceConfig(PluginConfigBase):
-    """MiMo 语音回复配置"""
-
-    plugin: PluginSectionConfig = Field(default_factory=PluginSectionConfig)
-    general: GeneralConfig = Field(default_factory=GeneralConfig)
-    trigger: TriggerConfig = Field(default_factory=TriggerConfig)
-    filters: FilterConfig = Field(default_factory=FilterConfig)
-    voice: VoiceConfig = Field(default_factory=VoiceConfig)
-    mimo: MiMoConfig = Field(default_factory=MiMoConfig)
-    delivery: DeliveryConfig = Field(default_factory=DeliveryConfig)
-
-
-# `from __future__ import annotations` 让 pydantic 收到字符串注解：统一在这里重建一次，
-# 宿主加载、单测直接 exec 模块都不会再报 "not fully defined"。
-for _config_model in (
-    PluginSectionConfig,
-    GeneralConfig,
-    TriggerConfig,
-    FilterConfig,
-    VoiceConfig,
-    MiMoConfig,
-    DeliveryConfig,
-    MiMoVoiceConfig,
-):
-    _config_model.model_rebuild(_types_namespace=globals())
-del _config_model
-
-
-def _stderr_excerpt(exc: BaseException, limit: int = 160) -> str:
-    """把 ffmpeg 的报错压成一行：完整命令行里有用户路径，不该整个进日志。"""
-    stderr = getattr(exc, "stderr", None) or b""
-    text = stderr.decode("utf-8", "replace") if isinstance(stderr, bytes) else str(stderr)
-    text = " ".join(text.split())
-    return (text[:limit] or type(exc).__name__)
-
-
-def _concat_path(path: Path) -> str:
-    """ffmpeg concat demuxer 的 file 行：单引号内的单引号需要转义，否则带引号的文件名会解析错。"""
-    return path.as_posix().replace("'", r"'\''")
-
-
-# ---------------------------------------------------------------- 音色对齐工具
-# 做法：把参考音频与每条合成音频都换成"以 600–2500Hz 为基准的相对频谱曲线"
-# （30 个对数频带，60Hz–12kHz），差值就是需要补的 EQ；限制在 ±6dB 以内，
-# 用 STFT 逐帧应用后再 overlap-add 回来。实测能把同句多次合成的频谱距离
-# 从 4–6.5dB 压到 1.6–2.2dB。
-
-
-def _timbre_band_edges() -> Any:
-    np = _numpy()
-    if np is None:  # pragma: no cover
-        raise RuntimeError("音色对齐需要 numpy")
-    return np.logspace(np.log10(60.0), np.log10(12000.0), 31)
-
-
-_BAND_MATRIX_CACHE: Dict[Tuple[int, int], Tuple[Any, Any]] = {}
-
-
-def _band_matrix(frame: int, rate: int) -> Tuple[Any, Any]:
-    """(weights, counts)：把 FFT 频点归并到 30 个频带的矩阵，按帧长/采样率缓存。
-
-    以前每个音频要重建两次（算曲线一次、应用增益一次），矩阵本身与音频无关，
-    缓存后单条语音能省掉两次 30×1025 的构造。
-    """
-    np = _numpy()
-    if np is None:  # pragma: no cover
-        raise RuntimeError("音色对齐需要 numpy")
-    key = (int(frame), int(rate))
-    cached = _BAND_MATRIX_CACHE.get(key)
-    if cached is not None:
-        return cached
-    freqs = np.fft.rfftfreq(frame, d=1.0 / rate)
-    edges = _timbre_band_edges()
-    band_of_bin = np.clip(np.searchsorted(edges, freqs, side="right") - 1, 0, len(edges) - 2)
-    weights = np.zeros((len(edges) - 1, len(freqs)), dtype=np.float32)
-    weights[band_of_bin, np.arange(len(freqs))] = 1.0
-    counts = weights.sum(axis=1)
-    counts[counts == 0] = 1.0
-    if len(_BAND_MATRIX_CACHE) > 8:
-        _BAND_MATRIX_CACHE.clear()
-    _BAND_MATRIX_CACHE[key] = (weights, counts)
-    return weights, counts
-
-
-def _spectral_curve(pcm: Any, rate: int) -> Any:
-    """返回长度 30 的相对频谱曲线（dB，已按 600–2500Hz 中位数归零）。"""
-    np = _numpy()
-    if np is None:  # pragma: no cover
-        raise RuntimeError("音色对齐需要 numpy")
-
-    frame = 2048
-    if len(pcm) < frame * 2:
-        frame = max(256, (len(pcm) // 4) // 2 * 2)
-    hop = max(1, frame // 2)
-    window = np.hanning(frame).astype(np.float32)
-    edges = _timbre_band_edges()
-    weights, counts = _band_matrix(frame, rate)
-    acc = np.zeros(len(edges) - 1, dtype=np.float64)
-    frames = 0
-    for start in range(0, len(pcm) - frame + 1, hop):
-        spec = np.abs(np.fft.rfft(pcm[start : start + frame] * window))
-        acc += weights @ spec
-        frames += 1
-    if frames == 0:
-        return np.zeros(len(edges) - 1, dtype=np.float32)
-    curve = 20.0 * np.log10(np.maximum(acc / frames / counts, 1e-9))
-    mask = (edges[:-1] >= 600.0) & (edges[1:] <= 2500.0)
-    if not mask.any():
-        mask = np.ones_like(curve, dtype=bool)
-    return (curve - float(np.median(curve[mask]))).astype(np.float32)
-
-
-def _apply_gain_curve(pcm: Any, rate: int, gains_db: Any) -> Any:
-    """用 STFT 把频带增益应用到时域，返回与输入等长、音量不增的信号。"""
-    np = _numpy()
-    if np is None:  # pragma: no cover
-        raise RuntimeError("音色对齐需要 numpy")
-
-    frame = 2048
-    if len(pcm) < frame * 2:
-        frame = max(256, (len(pcm) // 4) // 2 * 2)
-    hop = max(1, frame // 2)
-    window = np.hanning(frame).astype(np.float32)
-    freqs = np.maximum(np.fft.rfftfreq(frame, d=1.0 / rate), 1.0)
-    edges = _timbre_band_edges()
-    centers = np.sqrt(edges[:-1] * edges[1:])
-    gain = np.interp(np.log10(freqs), np.log10(centers), np.asarray(gains_db, dtype=np.float64))
-    linear = (10.0 ** (gain / 20.0)).astype(np.float32)
-    out = np.zeros(len(pcm), dtype=np.float32)
-    norm = np.zeros(len(pcm), dtype=np.float32)
-    for start in range(0, len(pcm) - frame + 1, hop):
-        spec = np.fft.rfft(pcm[start : start + frame] * window) * linear
-        out[start : start + frame] += np.fft.irfft(spec).astype(np.float32) * window
-        norm[start : start + frame] += window * window
-    mask = norm > 1e-6
-    out[mask] /= norm[mask]
-    peak = float(np.max(np.abs(out))) if len(out) else 0.0
-    if peak > 0.99:
-        out *= 0.99 / peak
-    return out
-
-
-def _read_wav_pcm(audio: bytes) -> Tuple[Any, int]:
-    np = _numpy()
-    if np is None:  # pragma: no cover
-        raise RuntimeError("音频处理需要 numpy")
-
-    with wave.open(io.BytesIO(audio), "rb") as fh:
-        rate = fh.getframerate()
-        width = fh.getsampwidth()
-        channels = fh.getnchannels()
-        raw = fh.readframes(fh.getnframes())
-    if width != 2:
-        raise ValueError(f"只处理 16-bit PCM（实际 {width * 8} bit）")
-    pcm = np.frombuffer(raw, dtype="<i2").astype(np.float32) / 32768.0
-    if channels > 1:
-        pcm = pcm.reshape(-1, channels).mean(axis=1)
-    return pcm, rate
-
-
-def _write_wav_pcm(pcm: Any, rate: int) -> bytes:
-    np = _numpy()
-    if np is None:  # pragma: no cover
-        raise RuntimeError("音频处理需要 numpy")
-
-    data = np.clip(np.asarray(pcm, dtype=np.float32), -1.0, 1.0)
-    raw = (data * 32767.0).astype("<i2").tobytes()
-    buffer = io.BytesIO()
-    with wave.open(buffer, "wb") as fh:
-        fh.setnchannels(1)
-        fh.setsampwidth(2)
-        fh.setframerate(rate)
-        fh.writeframes(raw)
-    return buffer.getvalue()
 
 
 class MiMoVoicePlugin(MaiBotPlugin):
@@ -628,7 +170,7 @@ class MiMoVoicePlugin(MaiBotPlugin):
         """
         shown: set[str] = set()
         buckets = 0
-        for warning in _CONFIG_WARNINGS:
+        for warning in _config.drain_config_warnings():
             key = warning.split(":", 1)[0]
             if key in shown:
                 continue
@@ -640,7 +182,6 @@ class MiMoVoicePlugin(MaiBotPlugin):
         hidden = len(shown) - buckets
         if hidden > 0:
             self.ctx.logger.warning("另有 %d 类配置告警未展开，详见 config.toml 与插件文档", hidden)
-        _CONFIG_WARNINGS.clear()
 
     async def on_unload(self) -> None:
         await self._close_session()
@@ -1272,77 +813,12 @@ class MiMoVoicePlugin(MaiBotPlugin):
     # ------------------------------------------------------------------- 文本清洗
 
     def _sanitize_for_tts(self, text: str) -> Optional[str]:
-        """把聊天文本整理成适合朗读的句子。
-
-        去表情/零宽字符/首尾引号、按 english_policy 处理英文口癖、
-        把 ～ 和省略号折成逗号、补句末标点。
-        实测这些符号会让合成音高漂移 2–4 个半音，并带来首尾的爆音与长静音。
-        """
-        cleaned = _URL_PATTERN.sub("", text)
-        cleaned = _CQ_PATTERN.sub("", cleaned)
-        cleaned = _EMOJI_PATTERN.sub("", cleaned)
-        cleaned = self._apply_english_policy(cleaned)
-        # 零宽字符/方向控制符会让模型把停顿读错；引号括号则会被念成奇怪的语气
-        cleaned = re.sub(r"[\u200b-\u200f\u202a-\u202e\u2060\ufeff]", "", cleaned)
-        cleaned = re.sub(r"[「」『』“”‘’\"'（）()【】\[\]《》〈〉]", "", cleaned)
-        cleaned = cleaned.replace("\u3000", " ")
-        cleaned = re.sub(r"\s+", " ", cleaned).strip()
-        # 去掉 URL/英文口癖后常留下"看这个 吧"这类空格：中文之间不需要空格，朗读时会变成多余停顿
-        cleaned = re.sub(r"(?<=[\u4e00-\u9fff\uff0c\u3002\uff01\uff1f])\s+(?=[\u4e00-\u9fff])", "", cleaned)
-        cleaned = _LEAD_NOISE_PATTERN.sub("", cleaned)
-        cleaned = _TAIL_NOISE_PATTERN.sub("", cleaned)
-        cleaned = re.sub(r"[~～]+", "，", cleaned)
-        cleaned = re.sub(r"(…+|\.{3,}|。{2,})", "，", cleaned)
-        cleaned = re.sub(r"[!！]{2,}", "！", cleaned)
-        cleaned = re.sub(r"[?？]{2,}", "？", cleaned)
-        cleaned = re.sub(r"[，,、]{2,}", "，", cleaned)
-        cleaned = re.sub(r"，+([。！？])", r"\1", cleaned)
-        cleaned = cleaned.strip("，,、 ")
-        if not cleaned:
-            return None
-        if cleaned[-1] not in _SENTENCE_END:
-            cleaned += "。"
-        return cleaned
-
-    @staticmethod
-    def _is_tic_token(token: str) -> bool:
-        """判断拉丁串是不是"口癖"而不是真词。
-
-        命中两类：整词是同一个辅音的重复（ww / mmm / hhhh），
-        或一个元音 + 同一辅音重复三次以上（emmm / ohhhhhhh）。
-        LLM/SSR/boss/miss/cos/token 这类真词与缩写一律不匹配。
-        """
-        low = token.lower()
-        if len(low) < 2:
-            return False
-        if len(set(low)) == 1 and low[0] in _CONSONANTS:
-            return True
-        # 一个元音 + 同一辅音重复三次以上（emmm / ohhhhhhh）
-        return (
-            low[0] in _VOWELS
-            and len(low) >= 4
-            and len(set(low[1:])) == 1
-            and low[1] in _CONSONANTS
-        )
-
-    @staticmethod
-    def _touches_digit(text: str, match: Any) -> bool:
-        """拉丁串紧挨着数字时不当作口癖（ff14、mp3、b站25 这类是型号不是语气）。"""
-        start, end = match.span()
-        before = text[start - 1] if start > 0 else ""
-        after = text[end] if end < len(text) else ""
-        return before.isdigit() or after.isdigit()
+        """把聊天文本整理成适合朗读的句子（实现见 ``core.text``）。"""
+        return _text.sanitize_for_tts(text, self.config.trigger.english_policy)
 
     def _apply_english_policy(self, text: str) -> str:
-        policy = self.config.trigger.english_policy
-        if policy == "keep":
-            return text
-        if policy == "strip":
-            return _LATIN_PATTERN.sub("", text)
-        return _LATIN_PATTERN.sub(
-            lambda m: "" if self._is_tic_token(m.group(0)) and not self._touches_digit(text, m) else m.group(0),
-            text,
-        )
+        """按 ``trigger.english_policy`` 处理拉丁字母（实现见 ``core.text``）。"""
+        return _text.apply_english_policy(text, self.config.trigger.english_policy)
 
     # ------------------------------------------------------------------- 过滤
 
@@ -1434,22 +910,9 @@ class MiMoVoicePlugin(MaiBotPlugin):
         return str(kwargs.get("stream_id") or message.get("session_id") or "").strip()
 
     def _plain_text_message(self, message: Dict[str, Any]) -> Optional[str]:
-        raw = message.get("raw_message")
-        if not isinstance(raw, list) or not raw:
-            return None
-        segments = [item for item in raw if isinstance(item, dict)]
-        # 引用回复会带一个 reply 段，不能因为它就把整条消息当成“非纯文本”跳过：
-        # 转语音时引用段本来就会被移除。这里只接受 text(+reply) 组合，且必须恰好一个 text。
-        types = [str(segment.get("type") or "") for segment in segments]
-        if any(kind not in {"text", "reply"} for kind in types) or types.count("text") != 1:
-            return None
-        segment = segments[types.index("text")]
-        data = segment.get("data")
-        text = data if isinstance(data, str) else (data or {}).get("text") if isinstance(data, dict) else None
-        if not isinstance(text, str):
-            return None
-        text = _CQ_PATTERN.sub("", text).strip()
-        return text or None
+        """取出纯文本内容（实现见 ``core.text``）。"""
+        return _text.plain_text_message(message)
+
 
     def _text_override_active(self, stream_id: str) -> bool:
         expires_at = self._text_override_sessions.get(stream_id, 0.0)
@@ -1509,7 +972,7 @@ class MiMoVoicePlugin(MaiBotPlugin):
             return True
         if not self._short_enough(text):
             return False
-        if self.config.trigger.random_requires_chinese and _LATIN_PATTERN.search(text):
+        if self.config.trigger.random_requires_chinese and _text.contains_latin(text):
             # 随机抽中的一次机会，宁可发文字也别把 token/LLM 念成字母；
             # 放在抽签之前，避免白耗掉 decision_ttl 内的这次判定
             return False
@@ -1666,7 +1129,6 @@ class MiMoVoicePlugin(MaiBotPlugin):
         self._prune_ttl_cache(self._llm_voice_requests)
         self._text_override_sessions.pop(stream_id, None)
         return {"success": True, "content": "这一轮会用语音回复，正常给出回复内容即可。"}
-
 
 def create_plugin() -> MiMoVoicePlugin:
     return MiMoVoicePlugin()

@@ -8,9 +8,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from __bootstrap import REPO_ROOT, Checker, load_plugin, make_plugin
+from __bootstrap import REPO_ROOT, Checker, config_module, load_plugin, make_plugin
 
 module = load_plugin()
+cfg = config_module(module)
 checker = Checker("配置侧")
 
 # ---------------------------------------------------------------- 默认值
@@ -54,18 +55,18 @@ for key, want in expected.items():
     checker.equal(f"默认 {key}", defaults[key], want)
 
 # ---------------------------------------------------------------- 地址守卫
-checker.equal("官方地址放行", module._api_base_url_problem("https://api.xiaomimimo.com/v1", allow_private=False), "")
-checker.equal("http 被拒", module._api_base_url_problem("http://api.xiaomimimo.com/v1", allow_private=False), "不是 https")
+checker.equal("官方地址放行", cfg._api_base_url_problem("https://api.xiaomimimo.com/v1", allow_private=False), "")
+checker.equal("http 被拒", cfg._api_base_url_problem("http://api.xiaomimimo.com/v1", allow_private=False), "不是 https")
 for bad in ("https://localhost:8000", "https://127.0.0.1/v1", "https://192.168.1.10/v1", "https://169.254.169.254/latest", "https://[::1]/v1"):
-    checker.equal(f"内网被拒 {bad}", module._api_base_url_problem(bad, allow_private=False), "指向本机或内网地址")
-checker.equal("允许私有后放行", module._api_base_url_problem("http://192.168.1.10:8000/v1", allow_private=True), "")
+    checker.equal(f"内网被拒 {bad}", cfg._api_base_url_problem(bad, allow_private=False), "指向本机或内网地址")
+checker.equal("允许私有后放行", cfg._api_base_url_problem("http://192.168.1.10:8000/v1", allow_private=True), "")
 
 # 非法地址在构造配置时就回退，并留下告警
-bad_config = module.MiMoVoiceConfig(mimo={"api_base_url": "http://127.0.0.1:8000"})
+bad_config = cfg.MiMoVoiceConfig(mimo={"api_base_url": "http://127.0.0.1:8000"})
 checker.equal("非法配置回退官方地址", bad_config.mimo.api_base_url, "https://api.xiaomimimo.com/v1")
-warnings = list(module._CONFIG_WARNINGS)
+warnings = list(cfg._CONFIG_WARNINGS)
 checker.check("回退时写入配置告警", any("api_base_url" in item for item in warnings), f"{warnings[:2]}")
-module._CONFIG_WARNINGS.clear()
+cfg._CONFIG_WARNINGS.clear()
 
 # ---------------------------------------------------------------- 告警去重
 inst, _, logger = make_plugin(module)
@@ -75,7 +76,7 @@ inst._warn_once("demo:other", "另一类")
 checker.equal("同一 key 只打一次，不同 key 各打一次", logger.messages("warning"), ["第一次 a", "另一类"])
 
 # 配置告警按桶去重：同类只展开一条
-module._CONFIG_WARNINGS.extend(
+cfg._CONFIG_WARNINGS.extend(
     [
         "mimo.api_base_url: 第 1 条",
         "mimo.api_base_url: 第 2 条",
@@ -90,7 +91,7 @@ checker.equal(
     logger2.messages("warning"),
     ["mimo.api_base_url: 第 1 条", "general.timeout: 第 3 条", "general.max_text_length: 第 4 条"],
 )
-checker.equal("清理后桶为空", module._CONFIG_WARNINGS, [])
+checker.equal("清理后桶为空", cfg._CONFIG_WARNINGS, [])
 
 # ---------------------------------------------------------------- 版本一致性
 manifest = json.loads((REPO_ROOT / "_manifest.json").read_text(encoding="utf-8"))

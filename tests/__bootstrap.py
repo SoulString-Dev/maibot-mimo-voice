@@ -54,26 +54,22 @@ class FakeCtx:
 
 def load_plugin() -> ModuleType:
     """按文件路径加载 plugin.py（避免依赖包名与 sys.path）。"""
-    spec = importlib.util.spec_from_file_location("maibot_mimo_voice_plugin", PLUGIN_FILE)
+    spec = importlib.util.spec_from_file_location(
+        "maibot_mimo_voice_plugin",
+        PLUGIN_FILE,
+        submodule_search_locations=[str(PLUGIN_FILE.parent)],
+    )
     if spec is None or spec.loader is None:  # pragma: no cover
         raise RuntimeError(f"无法加载 {PLUGIN_FILE}")
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
-    # `from __future__ import annotations` 会让 pydantic 拿到字符串注解，需要重建一次
-    namespaces = vars(module)
-    for name in (
-        "PluginSectionConfig",
-        "GeneralConfig",
-        "TriggerConfig",
-        "FilterConfig",
-        "VoiceConfig",
-        "MiMoConfig",
-        "DeliveryConfig",
-        "MiMoVoiceConfig",
-    ):
-        getattr(module, name).model_rebuild(_types_namespace=namespaces)
     return module
+
+
+def config_module(module: ModuleType) -> ModuleType:
+    """取出插件加载时注册的 ``core.config`` 子模块（配置模型真正的归属）。"""
+    return sys.modules[f"{module.__name__}.core.config"]
 
 
 def make_plugin(module: ModuleType, **overrides: Any):

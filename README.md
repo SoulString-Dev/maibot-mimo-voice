@@ -136,7 +136,7 @@ private_mode = "all"
 
 | 配置 | 默认 | 说明 |
 |---|---|---|
-| `plugin.config_version` | `0.5.0` | 配置版本号（内部使用，无需修改） |
+| `plugin.config_version` | `0.5.1` | 配置版本号（内部使用，无需修改） |
 | `mimo.api_base_url` | `https://api.xiaomimimo.com/v1` | 必须是 https 公网地址；写成内网/本机地址会自动回退官方地址并告警 |
 | `mimo.model` | `mimo-v2.5-tts-voiceclone` | 也可用 `mimo-v2.5-tts`（预置音色） |
 | `mimo.audio_format` | `mp3` | `mp3` / `wav`；开了任一音频后处理（音色对齐 / 尾音裁剪 / 补尾音 / 峰值归一）时自动改用 `wav`，此项实际被忽略 |
@@ -195,7 +195,13 @@ private_mode = "all"
 
 ```
 <插件目录>/
-├── plugin.py
+├── plugin.py                    # 入口：生命周期 / Hook / 过滤 / 合成编排
+├── core/                        # 可复用的纯逻辑
+│   ├── constants.py             # 阈值与默认值
+│   ├── config.py                # 配置模型 + api_base_url 校验
+│   ├── text.py                  # 朗读清洗 / 英文口癖策略
+│   └── audio.py                 # WAV 读写 / 频谱曲线 / 音色对齐矩阵
+├── tests/                       # 79 条断言，不依赖 pytest
 ├── config.example.toml
 ├── _manifest.json
 ├── assets/icon.svg              # 商店图标
@@ -269,13 +275,13 @@ private_mode = "all"
 
 ```bash
 # 语法与配置校验
-python -m py_compile plugin.py
+python -m py_compile plugin.py core/*.py
 python -c "import tomllib; tomllib.load(open('config.example.toml','rb'))"
 
 # 静态检查 + 类型检查 + 单测（依赖见 requirements-dev.txt）
 pip install -r requirements-dev.txt
 ruff check .
-mypy plugin.py   # 需先装 maibot-plugin-sdk，否则基类被当作 Any，会漏掉 self.config 的类型问题
+mypy plugin.py core   # 需先装 maibot-plugin-sdk，否则基类被当作 Any，会漏掉 self.config 的类型问题
 python tests/run_all.py     # 文本/音频/配置三组共 74 条断言
 ```
 
@@ -285,7 +291,7 @@ CI（`.github/workflows/ci.yml`）在每次 push / PR 上跑同样三条命令�
 部署到运行中的麦麦（示例：NAS 上的容器）：
 
 ```bash
-tar czf /tmp/mv.tgz plugin.py config.example.toml _manifest.json README.md
+tar czf /tmp/mv.tgz plugin.py core config.example.toml _manifest.json README.md
 scp /tmp/mv.tgz user@nas:/tmp/
 ssh user@nas 'cd <插件目录> && tar xzf /tmp/mv.tgz && sudo chown -R 1000:1000 .'
 ```
