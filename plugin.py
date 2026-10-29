@@ -41,7 +41,7 @@ from maibot_sdk.types import ErrorPolicy, HookMode, HookOrder
 
 SUPPORTED_REFERENCE_SUFFIXES = {".aac", ".flac", ".m4a", ".mp3", ".mpeg", ".ogg", ".opus", ".wav", ".wma"}
 VOICE_SEGMENT_TYPE = "voice"
-DEFAULT_STYLE_INSTRUCTION = "用同一个人的音色朗读，语速平稳，情绪自然，不要夸张，不要拖长尾音。"
+DEFAULT_STYLE_INSTRUCTION = "用同一个人的音色说话，像平时聊天一样语速稍快、句子连贯，不要拖长尾音，情绪自然。"
 _URL_PATTERN = re.compile(r"https?://\S+")
 _CQ_PATTERN = re.compile(r"\[CQ:[^\]]+\]")
 # 表情符号与零宽字符：朗读前必须清掉，否则会被念出来或者把音高带跑。
@@ -66,14 +66,18 @@ _MAX_AUDIO_SECONDS = 20.0
 _AUDIO_SECONDS_CAP = 90.0
 _AUDIO_SECONDS_PER_CHAR = 0.7
 # 各类按会话缓存的上限；超过就整体清空，避免长期运行缓慢泄漏。
-_CACHE_MAX_ENTRIES = 512
+_TTL_CACHE_MAX_ENTRIES = 512
 _MIN_RMS_DBFS = -40.0
 _SILENCE_DBFS = -45.0
 _PEAK_TARGET_DBFS = -1.5
+_PEAK_GAIN_MIN = 0.25
+_PEAK_GAIN_MAX = 4.0
+_TIMBRE_MAX_GAIN_DB = 6.0
+_PEAK_GAIN_EPSILON = 0.01
 _TAIL_KEEP_SECONDS = 0.05
 _CONFIG_WARNINGS: List[str] = []
 _SCOPE_TTL_SECONDS = 12 * 3600.0
-_SCOPE_MAX_ENTRIES = 5000
+_SCOPE_CACHE_MAX_ENTRIES = 5000
 # 内置音色：随插件分发的标准参考音频（由 MiMo 预置音色按同一套升调/裁剪流程生成）。
 PRESET_REFERENCE_FILES = {
     "bingtang": "reference-bingtang.wav",
@@ -752,75 +756,101 @@ class MiMoVoicePlugin(MaiBotPlugin):
             self.ctx.logger.info("参考音频缓存已清理 %d 个旧文件", removed)
 
     def _pick_best_single(self, files: List[Path]) -> Optional[Path]:
-        preferred = ""
-        if preferred:
-            for item in files:
-                if item.name == preferred:
-                    return item
-        # 没有 ffprobe 时退化为“时长最接近上限”的近似选择：优先较大的文件，再截断。
-        target = _REFERENCE_MAX_CLIP_SECONDS
+        """挑一段最接近上限时长的素材：能读 WAV 头就按真实时长，读不了才按体积估算。"""
+        limit = float(_REFERENCE_MAX_CLIP_SECONDS)
+        bytes_per_second = float(_REFERENCE_SAMPLE_RATE) * 2.0
         candidates = [item for item in files if item.stat().st_size > 8 * 1024]
         if not candidates:
             return None
-        return max(candidates, key=lambda item: min(item.stat().st_size / 48000.0, target))
 
-    def _build_reference_with_ffmpeg(self, files: List[Path]) -> Optional[bytes]:
+        def score(item: Path) -> float:
+            try:
+                with wave.open(str(item), "rb") as handle:
+                    seconds = handle.getnframes() / float(handle.getframerate() or 1)
+            except (OSError, wave.Error, EOFError):
+                seconds = item.stat().st_size / bytes_per_second
+            return min(seconds, limit)
+
+        return max(candidates, key=score)
+
+    def _run_ffmpeg(self, command: List[str], what: str) -> bool:
+        """统一跑 ffmpeg：不进 shell、不读 stdin、失败只留一行摘要。"""
+        try:
+            subprocess.run(command, check=True, capture_output=True, stdin=subprocess.DEVNULL)
+            return True
+        except (OSError, subprocess.SubprocessError) as exc:
+            self.ctx.logger.warning("参考音频%s失败：%s", what, _stderr_excerpt(exc))
+            return False
+
+    def _encode_reference(self, source: Path, output: Path, filter_chain: str, what: str) -> bool:
         ffmpeg = self._ffmpeg()
         if ffmpeg is None:
-            return None
+            return False
+        command = [ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-i", str(source),
+                   "-af", filter_chain, "-ac", "1", "-ar", str(int(_REFERENCE_SAMPLE_RATE)),
+                   "-c:a", "pcm_s16le", str(output)]
+        return self._run_ffmpeg(command, what)
+
+    def _concat_reference(self, listing: Path, output: Path, codec_args: List[str], what: str) -> bool:
+        ffmpeg = self._ffmpeg()
+        if ffmpeg is None:
+            return False
+        command = [ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-f", "concat", "-safe", "0",
+                   "-i", str(listing), "-ac", "1", "-ar", str(int(_REFERENCE_SAMPLE_RATE))]
+        command += list(codec_args) + [str(output)]
+        return self._run_ffmpeg(command, what)
+
+    def _build_reference_with_ffmpeg(self, files: List[Path]) -> Optional[bytes]:
         strategy = self.config.voice.reference_strategy
-        rate = int(_REFERENCE_SAMPLE_RATE)
+        signature = self._reference_signature or "x"
         workdir = self._cache_dir()
-        output = workdir / f"reference-{self._reference_signature or 'x'}.wav"
+        suffix = ".mp3" if strategy == "full_merge" else ".wav"
+        output = workdir / f"reference-{signature}{suffix}"
         if output.is_file() and output.stat().st_size > 0:
             return output.read_bytes()
-        try:
-            if strategy == "best_single":
-                source = self._pick_best_single(files)
-                if source is None:
-                    return None
-                limit = float(_REFERENCE_MAX_CLIP_SECONDS)
-                silence = float(_REFERENCE_SILENCE_DB)
-                filter_chain = (
-                    f"silenceremove=start_periods=1:start_silence=0.1:start_threshold={silence}dB,"
-                    f"areverse,silenceremove=start_periods=1:start_silence=0.1:start_threshold={silence}dB,areverse,"
-                    f"atrim=0:{limit},asetpts=N/SR/TB"
-                )
-                command = [ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-i", str(source),
-                           "-af", filter_chain, "-ac", "1", "-ar", str(rate), "-c:a", "pcm_s16le", str(output)]
-            elif strategy == "balanced":
-                clip = float(_REFERENCE_BALANCED_CLIP_SECONDS)
-                pieces = []
-                for index, item in enumerate(files):
-                    piece = workdir / f"part-{index}.wav"
-                    subprocess.run(
-                        [ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-i", str(item),
-                         "-af", f"atrim=0:{clip},asetpts=N/SR/TB", "-ac", "1", "-ar", str(rate),
-                         "-c:a", "pcm_s16le", str(piece)],
-                        check=True, capture_output=True, stdin=subprocess.DEVNULL,
-                    )
+        limit = float(_REFERENCE_MAX_CLIP_SECONDS)
+        silence = float(_REFERENCE_SILENCE_DB)
+        trim_chain = (
+            f"silenceremove=start_periods=1:start_silence=0.1:start_threshold={silence}dB,"
+            f"areverse,silenceremove=start_periods=1:start_silence=0.1:start_threshold={silence}dB,areverse,"
+        )
+        ok = False
+        if strategy == "best_single":
+            source = self._pick_best_single(files)
+            if source is None:
+                return None
+            ok = self._encode_reference(
+                source, output, f"{trim_chain}atrim=0:{limit},asetpts=N/SR/TB", "裁剪"
+            )
+        elif strategy == "balanced":
+            clip = float(_REFERENCE_BALANCED_CLIP_SECONDS)
+            pieces_dir = workdir / f"parts-{signature}"
+            pieces_dir.mkdir(parents=True, exist_ok=True)
+            pieces = []
+            for index, item in enumerate(files):
+                piece = pieces_dir / f"part-{index}.wav"
+                if self._encode_reference(item, piece, f"atrim=0:{clip},asetpts=N/SR/TB", "截段"):
                     pieces.append(piece)
-                if not pieces:
-                    return None
-                listing = workdir / "parts.txt"
-                listing.write_text("".join(f"file '{_concat_path(piece)}'\n" for piece in pieces), encoding="utf-8")
-                command = [ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-f", "concat", "-safe", "0",
-                           "-i", str(listing), "-ac", "1", "-ar", str(rate), "-c:a", "pcm_s16le", str(output)]
-            else:  # full_merge
-                listing = workdir / "merge.txt"
-                listing.write_text("".join(f"file '{_concat_path(item)}'\n" for item in files), encoding="utf-8")
-                merged = workdir / f"reference-{self._reference_signature or 'x'}.mp3"
-                command = [ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-f", "concat", "-safe", "0",
-                           "-i", str(listing), "-ac", "1", "-ar", str(rate),
-                           "-c:a", "libmp3lame", "-b:a", f"{int(_REFERENCE_BITRATE_KBPS)}k",
-                           str(merged)]
-                subprocess.run(command, check=True, capture_output=True, stdin=subprocess.DEVNULL)
-                return merged.read_bytes()
-            subprocess.run(command, check=True, capture_output=True, stdin=subprocess.DEVNULL)
-            if output.is_file() and output.stat().st_size > 0:
-                return output.read_bytes()
-        except (OSError, subprocess.SubprocessError) as exc:
-            self.ctx.logger.warning("参考音频预处理失败，回退为原始参考文件：%s", _stderr_excerpt(exc))
+            if not pieces:
+                return None
+            listing = pieces_dir / "parts.txt"
+            listing.write_text(
+                "".join(f"file '{_concat_path(piece)}'\n" for piece in pieces), encoding="utf-8"
+            )
+            ok = self._concat_reference(listing, output, ["-c:a", "pcm_s16le"], "拼接")
+        else:  # full_merge
+            listing = workdir / f"merge-{signature}.txt"
+            listing.write_text(
+                "".join(f"file '{_concat_path(item)}'\n" for item in files), encoding="utf-8"
+            )
+            ok = self._concat_reference(
+                listing,
+                output,
+                ["-c:a", "libmp3lame", "-b:a", f"{int(_REFERENCE_BITRATE_KBPS)}k"],
+                "合并",
+            )
+        if ok and output.is_file() and output.stat().st_size > 0:
+            return output.read_bytes()
         return None
 
     def _reference_bytes(self) -> Optional[bytes]:
@@ -972,6 +1002,7 @@ class MiMoVoicePlugin(MaiBotPlugin):
             raise _RetryableSynthesisError(f"MiMo TTS 返回的音频几乎无声（{dbfs:.1f} dBFS）")
         return audio
 
+    # [b-batch]
     def _postprocess(self, audio: bytes) -> bytes:
         """音色对齐 + 尾音裁剪 + 峰值归一 + 尾部补静音，一次读完、一次写回。
 
@@ -996,6 +1027,7 @@ class MiMoVoicePlugin(MaiBotPlugin):
             return audio
         before_seconds = samples.size / float(rate)
         distance_db = None
+        changed = False
         if delivery.timbre_match:
             target = self._timbre_target()
             if target is not None:
@@ -1003,10 +1035,13 @@ class MiMoVoicePlugin(MaiBotPlugin):
                     target_arr = np.asarray(target, dtype=np.float32)
                     curve = _spectral_curve(samples, rate)
                     gains = np.clip(
-                        (target_arr - curve) * float(delivery.timbre_match_strength), -6.0, 6.0
+                        (target_arr - curve) * float(delivery.timbre_match_strength),
+                        -_TIMBRE_MAX_GAIN_DB,
+                        _TIMBRE_MAX_GAIN_DB,
                     )
                     distance_db = float(np.sqrt(np.mean((target_arr - curve) ** 2)))
                     samples = _apply_gain_curve(samples, rate, gains)
+                    changed = True
                 except Exception as exc:  # noqa: BLE001
                     self._warn_timbre_once("音色对齐失败（%s），本条按原样处理", exc)
         try:
@@ -1019,22 +1054,31 @@ class MiMoVoicePlugin(MaiBotPlugin):
                     if tail_ms > delivery.trim_tail_silence_ms:
                         keep = min(samples.size, last + int(rate * _TAIL_KEEP_SECONDS))
                         samples = samples[:keep]
+                        changed = True
             peak = float(np.max(np.abs(samples))) if samples.size else 0.0
             if delivery.peak_normalize and peak > 1e-6:
                 target_peak = 10 ** (_PEAK_TARGET_DBFS / 20.0)
-                gain = min(max(target_peak / peak, 0.25), 4.0)
-                samples = samples * gain
-                peak = min(1.0, peak * gain)
+                gain = min(max(target_peak / peak, _PEAK_GAIN_MIN), _PEAK_GAIN_MAX)
+                if abs(gain - 1.0) > _PEAK_GAIN_EPSILON:
+                    samples = samples * gain
+                    peak = min(1.0, peak * gain)
+                    changed = True
             if delivery.tail_pad_ms > 0:
                 pad_frames = int(rate * delivery.tail_pad_ms / 1000.0)
                 if pad_frames > 0:
                     samples = np.concatenate([samples, np.zeros(pad_frames, dtype=np.float32)])
+                    changed = True
             result = _write_wav_pcm(samples, rate)
         except Exception as exc:  # noqa: BLE001 - 后处理失败不该毁掉这条语音
             if not self._finish_warned:
                 self._finish_warned = True
                 self.ctx.logger.warning("尾音处理失败（%s），本条按原样发出", exc)
             return audio
+        if not changed and distance_db is None:
+            self.ctx.logger.debug(
+                "语音后处理无需调整：%.2fs，峰值 %.1f dBFS", before_seconds, 20.0 * float(np.log10(peak)) if peak > 1e-9 else -120.0
+            )
+            return result
         peak_dbfs = 20.0 * float(np.log10(peak)) if peak > 1e-9 else -120.0
         after_seconds = samples.size / float(rate)
         if distance_db is None:
@@ -1238,22 +1282,22 @@ class MiMoVoicePlugin(MaiBotPlugin):
         if not session_id:
             return
         now = time.monotonic()
-        if len(self._scope_cache) > _SCOPE_MAX_ENTRIES:
+        if len(self._scope_cache) > _SCOPE_CACHE_MAX_ENTRIES:
             self._scope_cache = {key: value for key, value in self._scope_cache.items() if value[0] > now}
-            if len(self._scope_cache) > _SCOPE_MAX_ENTRIES:
+            if len(self._scope_cache) > _SCOPE_CACHE_MAX_ENTRIES:
                 self._scope_cache.clear()
         self._scope_cache[session_id] = (now + _SCOPE_TTL_SECONDS, {"scope": scope, "group_id": group_id, "user_id": user_id})
 
     @staticmethod
     def _prune_ttl_cache(cache: Dict[str, float]) -> None:
         """TTL 字典兜底：超过上限先清过期项，还超就直接清空（这些缓存丢了只是多抽一次签）。"""
-        if len(cache) <= _CACHE_MAX_ENTRIES:
+        if len(cache) <= _TTL_CACHE_MAX_ENTRIES:
             return
         now = time.monotonic()
         for key, expires_at in list(cache.items()):
             if expires_at <= now:
                 cache.pop(key, None)
-        if len(cache) > _CACHE_MAX_ENTRIES:
+        if len(cache) > _TTL_CACHE_MAX_ENTRIES:
             cache.clear()
 
     def _lookup_scope(self, session_id: str) -> Dict[str, str]:
@@ -1321,11 +1365,11 @@ class MiMoVoicePlugin(MaiBotPlugin):
             return entry[1]
         enabled = random.random() < float(self.config.trigger.probability)
         self._random_decisions[stream_id] = (now + float(self.config.trigger.decision_ttl), enabled)
-        if len(self._random_decisions) > _CACHE_MAX_ENTRIES:
+        if len(self._random_decisions) > _TTL_CACHE_MAX_ENTRIES:
             self._random_decisions = {
                 key: value for key, value in self._random_decisions.items() if value[0] >= now
             }
-            if len(self._random_decisions) > _CACHE_MAX_ENTRIES:
+            if len(self._random_decisions) > _TTL_CACHE_MAX_ENTRIES:
                 self._random_decisions.clear()
         return enabled
 
