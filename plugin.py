@@ -16,17 +16,25 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import copy
 import hashlib
+import io
+import ipaddress
 import json
+import math
 import random
 import re
 import shutil
 import subprocess
 import time
+import wave
 from pathlib import Path
+from urllib.parse import urlsplit
 from typing import Any, Dict, List, Literal, Optional, Tuple
 
 import aiohttp
+
+from pydantic import model_validator
 
 from maibot_sdk import CONFIG_RELOAD_SCOPE_SELF, Field, HookHandler, MaiBotPlugin, PluginConfigBase, Tool
 from maibot_sdk.types import ErrorPolicy, HookMode, HookOrder
@@ -50,6 +58,20 @@ _CONSONANTS = "bcdfghjklmnpqrstvwxyz"
 _RETRYABLE_STATUS = frozenset({408, 425, 429, 500, 502, 503, 504})
 # 小于这个字节数的 mp3 基本是空音频（约 0.15 秒），按失败处理。
 _MIN_AUDIO_BYTES = 600
+_DEFAULT_API_BASE = "https://api.xiaomimimo.com/v1"
+_MIN_AUDIO_SECONDS = 0.3
+# 音频时长上限不是一个固定值：长文本（llm_trigger / voice_only / 模型点名）本来就该更长。
+# 这里按“中文字符数 × 0.7 秒”估算，下限 _MAX_AUDIO_SECONDS，上限 _AUDIO_SECONDS_CAP。
+_MAX_AUDIO_SECONDS = 20.0
+_AUDIO_SECONDS_CAP = 90.0
+_AUDIO_SECONDS_PER_CHAR = 0.7
+# 各类按会话缓存的上限；超过就整体清空，避免长期运行缓慢泄漏。
+_CACHE_MAX_ENTRIES = 512
+_MIN_RMS_DBFS = -40.0
+_SILENCE_DBFS = -45.0
+_PEAK_TARGET_DBFS = -1.5
+_TAIL_KEEP_SECONDS = 0.05
+_CONFIG_WARNINGS: List[str] = []
 _SCOPE_TTL_SECONDS = 12 * 3600.0
 _SCOPE_MAX_ENTRIES = 5000
 # 内置音色：随插件分发的标准参考音频（由 MiMo 预置音色按同一套升调/裁剪流程生成）。
@@ -84,7 +106,7 @@ class PluginSectionConfig(PluginConfigBase):
     __ui_label__ = "基础设置"
 
     enabled: bool = Field(default=True, description="是否启用语音回复")
-    config_version: str = Field(default="0.4.0", description="配置文件版本号（内部使用，无需修改）")
+    config_version: str = Field(default="0.5.0", description="配置文件版本号（内部使用，无需修改）")
 
 
 class GeneralConfig(PluginConfigBase):
@@ -206,7 +228,14 @@ class MiMoConfig(PluginConfigBase):
     __ui_label__ = "合成参数"
 
     api_key: str = Field(default="", description="MiMo 官方 API Key")
-    api_base_url: str = Field(default="https://api.xiaomimimo.com/v1", description="MiMo API 基础地址")
+    api_base_url: str = Field(
+        default=_DEFAULT_API_BASE,
+        description="MiMo API 基础地址，必须是以 https:// 开头的公网地址；写错会自动回退到官方地址",
+    )
+    allow_private_base_url: bool = Field(
+        default=False,
+        description="允许把参考音频发往内网/本机地址（只有自建代理时才需要，打开后会记一条警告）",
+    )
     model: str = Field(default="mimo-v2.5-tts-voiceclone", description="TTS 模型名")
     audio_format: Literal["mp3", "wav"] = Field(default="mp3", description="返回音频格式")
     temperature: float = Field(
@@ -229,6 +258,16 @@ class MiMoConfig(PluginConfigBase):
     retry_backoff_seconds: float = Field(default=1.5, ge=0.0, le=10.0, description="重试退避基数（秒），按 2 的幂指数增长")
     connect_timeout: float = Field(default=10.0, ge=1.0, le=60.0, description="建立连接的超时（秒），与整体超时分开")
 
+    @model_validator(mode="after")
+    def _check_base_url(self) -> "MiMoConfig":
+        cleaned = (self.api_base_url or "").strip() or _DEFAULT_API_BASE
+        problem = _api_base_url_problem(cleaned, allow_private=self.allow_private_base_url)
+        if problem:
+            message = f"mimo.api_base_url 不可用（{problem}），已回退为 {_DEFAULT_API_BASE}"
+            _CONFIG_WARNINGS.append(message)
+            object.__setattr__(self, "api_base_url", _DEFAULT_API_BASE)
+        return self
+
 
 class DeliveryConfig(PluginConfigBase):
     """发送行为"""
@@ -250,6 +289,62 @@ class DeliveryConfig(PluginConfigBase):
         le=1.0,
         description="音色对齐强度，0=不处理、1=完全对齐；补偿量始终限制在 ±6 dB 以内",
     )
+    trim_tail_silence_ms: int = Field(
+        default=250,
+        ge=0,
+        le=3000,
+        description="尾部静音超过这个毫秒数就裁掉（只留 50ms），0=不裁；实测合成尾部静音 94–474ms 不稳定",
+    )
+    tail_pad_ms: int = Field(
+        default=120,
+        ge=0,
+        le=1000,
+        description="处理完后在尾部补多少毫秒静音，避免播放端把最后一个字吃掉，0=不补",
+    )
+    peak_normalize: bool = Field(
+        default=True,
+        description="把峰值统一拉到 -1.5 dBFS，解决有的条小声有的条刺耳",
+    )
+
+
+def _is_private_host(host: str) -> bool:
+    """判断主机名是否指向本机、内网、链路本地或云元数据地址。"""
+    lowered = (host or "").strip().strip(".").lower()
+    if not lowered:
+        return True
+    if lowered in {"localhost", "localhost.localdomain"} or lowered.endswith(".localhost"):
+        return True
+    try:
+        address = ipaddress.ip_address(lowered)
+    except ValueError:
+        # 不含点的裸主机名（例如 docker 服务名）一律按内网处理
+        return "." not in lowered
+    return bool(
+        address.is_private
+        or address.is_loopback
+        or address.is_link_local
+        or address.is_reserved
+        or address.is_multicast
+        or address.is_unspecified
+    )
+
+
+def _api_base_url_problem(url: str, *, allow_private: bool) -> str:
+    """返回不可用的原因；空字符串表示没问题。"""
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return "不是合法的地址"
+    if parts.scheme not in {"http", "https"}:
+        return "不是 http(s) 地址"
+    if parts.scheme == "http" and not allow_private:
+        return "不是 https"
+    host = parts.hostname or ""
+    if not host:
+        return "缺少主机名"
+    if not allow_private and _is_private_host(host):
+        return "指向本机或内网地址"
+    return ""
 
 
 class MiMoVoiceConfig(PluginConfigBase):
@@ -262,6 +357,14 @@ class MiMoVoiceConfig(PluginConfigBase):
     voice: VoiceConfig = Field(default_factory=VoiceConfig)
     mimo: MiMoConfig = Field(default_factory=MiMoConfig)
     delivery: DeliveryConfig = Field(default_factory=DeliveryConfig)
+
+
+def _stderr_excerpt(exc: BaseException, limit: int = 160) -> str:
+    """把 ffmpeg 的报错压成一行：完整命令行里有用户路径，不该整个进日志。"""
+    stderr = getattr(exc, "stderr", None) or b""
+    text = stderr.decode("utf-8", "replace") if isinstance(stderr, bytes) else str(stderr)
+    text = " ".join(text.split())
+    return (text[:limit] or type(exc).__name__)
 
 
 def _concat_path(path: Path) -> str:
@@ -282,6 +385,34 @@ def _timbre_band_edges() -> Any:
     return np.logspace(np.log10(60.0), np.log10(12000.0), 31)
 
 
+_BAND_MATRIX_CACHE: Dict[Tuple[int, int], Tuple[Any, Any]] = {}
+
+
+def _band_matrix(frame: int, rate: int) -> Tuple[Any, Any]:
+    """(weights, counts)：把 FFT 频点归并到 30 个频带的矩阵，按帧长/采样率缓存。
+
+    以前每个音频要重建两次（算曲线一次、应用增益一次），矩阵本身与音频无关，
+    缓存后单条语音能省掉两次 30×1025 的构造。
+    """
+    import numpy as np
+
+    key = (int(frame), int(rate))
+    cached = _BAND_MATRIX_CACHE.get(key)
+    if cached is not None:
+        return cached
+    freqs = np.fft.rfftfreq(frame, d=1.0 / rate)
+    edges = _timbre_band_edges()
+    band_of_bin = np.clip(np.searchsorted(edges, freqs, side="right") - 1, 0, len(edges) - 2)
+    weights = np.zeros((len(edges) - 1, len(freqs)), dtype=np.float32)
+    weights[band_of_bin, np.arange(len(freqs))] = 1.0
+    counts = weights.sum(axis=1)
+    counts[counts == 0] = 1.0
+    if len(_BAND_MATRIX_CACHE) > 8:
+        _BAND_MATRIX_CACHE.clear()
+    _BAND_MATRIX_CACHE[key] = (weights, counts)
+    return weights, counts
+
+
 def _spectral_curve(pcm: Any, rate: int) -> Any:
     """返回长度 30 的相对频谱曲线（dB，已按 600–2500Hz 中位数归零）。"""
     import numpy as np
@@ -291,13 +422,8 @@ def _spectral_curve(pcm: Any, rate: int) -> Any:
         frame = max(256, (len(pcm) // 4) // 2 * 2)
     hop = max(1, frame // 2)
     window = np.hanning(frame).astype(np.float32)
-    freqs = np.fft.rfftfreq(frame, d=1.0 / rate)
     edges = _timbre_band_edges()
-    band_of_bin = np.clip(np.searchsorted(edges, freqs, side="right") - 1, 0, len(edges) - 2)
-    weights = np.zeros((len(edges) - 1, len(freqs)), dtype=np.float32)
-    weights[band_of_bin, np.arange(len(freqs))] = 1.0
-    counts = weights.sum(axis=1)
-    counts[counts == 0] = 1.0
+    weights, counts = _band_matrix(frame, rate)
     acc = np.zeros(len(edges) - 1, dtype=np.float64)
     frames = 0
     for start in range(0, len(pcm) - frame + 1, hop):
@@ -390,9 +516,12 @@ class MiMoVoicePlugin(MaiBotPlugin):
         self._llm_voice_requests: Dict[str, float] = {}
         self._scope_cache: Dict[str, Tuple[float, Dict[str, str]]] = {}
         self._reference_uri: Optional[str] = None
+        self._reference_stamp: str = ""
         self._reference_signature: Optional[str] = None
         self._timbre_target_cache: Optional[List[float]] = None
         self._timbre_warned = False
+        self._finish_warned = False
+        self._filter_warned: set[str] = set()
         self._synthesis_slots = asyncio.Semaphore(1)
 
     # ------------------------------------------------------------------ 生命周期
@@ -413,7 +542,8 @@ class MiMoVoicePlugin(MaiBotPlugin):
         strategy = self.config.voice.reference_strategy
         self.ctx.logger.info(
             "MiMo 语音插件已加载：音色=%s, mode=%s, probability=%.2f, 短句上限=%d字, 合成=%s, "
-            "风格指令=%s, 参考策略=%s, 英文=%s, 随机需纯中文=%s, 超时重试=%s, 音色对齐=%s, 群聊放行=%s, 私聊放行=%s",
+            "风格指令=%s, 参考策略=%s, 英文=%s, 随机需纯中文=%s, 超时重试=%s, 音色对齐=%s, "
+            "尾部裁剪=%dms, 尾部补静音=%dms, 峰值归一=%s, 群聊放行=%s, 私聊放行=%s",
             self.config.voice.preset,
             self.config.trigger.mode,
             self.config.trigger.probability,
@@ -425,11 +555,29 @@ class MiMoVoicePlugin(MaiBotPlugin):
             "开" if self.config.trigger.random_requires_chinese else "关",
             "开" if self.config.mimo.retry_on_timeout else "关",
             "开" if self.config.delivery.timbre_match else "关",
+            int(self.config.delivery.trim_tail_silence_ms),
+            int(self.config.delivery.tail_pad_ms),
+            "开" if self.config.delivery.peak_normalize else "关",
             self.config.filters.group_mode,
             self.config.filters.private_mode,
         )
         if data_dir is not None:
             self.ctx.logger.info("参考音频目录：%s（自定义音色把文件放这里）", data_dir / "references")
+        self._prune_reference_cache()
+        self._flush_config_warnings()
+        base_host = urlsplit(self.config.mimo.api_base_url).hostname or ""
+        if base_host and not base_host.endswith("xiaomimimo.com"):
+            self.ctx.logger.warning(
+                "待合成文本与参考音频会发送到自建/第三方地址 %s，请确认可信；"
+                "若只是误填，把 mimo.api_base_url 改回 https://api.xiaomimimo.com/v1",
+                base_host,
+            )
+
+    def _flush_config_warnings(self) -> None:
+        """把本轮配置校验攒下的告警打一次就清空，避免下次热重载重复打印旧告警。"""
+        for warning in _CONFIG_WARNINGS[-5:]:
+            self.ctx.logger.warning(warning)
+        _CONFIG_WARNINGS.clear()
 
     async def on_unload(self) -> None:
         await self._close_session()
@@ -443,11 +591,15 @@ class MiMoVoicePlugin(MaiBotPlugin):
         self._llm_voice_requests.clear()
         self._scope_cache.clear()
         self._reference_uri = None
+        self._reference_stamp = ""
         self._reference_signature = None
         self._timbre_target_cache = None
         self._timbre_warned = False
+        self._finish_warned = False
+        self._filter_warned.clear()
         self._synthesis_slots = asyncio.Semaphore(max(1, int(self.config.mimo.max_concurrent)))
         self.ctx.logger.info("MiMo 语音插件配置已热更新")
+        self._flush_config_warnings()
 
     async def _close_session(self) -> None:
         if self._session is not None and not self._session.closed:
@@ -578,6 +730,27 @@ class MiMoVoicePlugin(MaiBotPlugin):
                 pass
         return self._plugin_dir()
 
+    def _prune_reference_cache(self, keep: int = 6) -> None:
+        """参考音频缓存只增不减会慢慢占满卷：按修改时间只留最近几个。"""
+        try:
+            directory = self._cache_dir()
+            files = sorted(
+                (path for path in directory.iterdir() if path.is_file()),
+                key=lambda path: path.stat().st_mtime,
+                reverse=True,
+            )
+        except OSError:
+            return
+        removed = 0
+        for path in files[keep:]:
+            try:
+                path.unlink()
+                removed += 1
+            except OSError:
+                continue
+        if removed:
+            self.ctx.logger.info("参考音频缓存已清理 %d 个旧文件", removed)
+
     def _pick_best_single(self, files: List[Path]) -> Optional[Path]:
         preferred = ""
         if preferred:
@@ -624,7 +797,7 @@ class MiMoVoicePlugin(MaiBotPlugin):
                         [ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-i", str(item),
                          "-af", f"atrim=0:{clip},asetpts=N/SR/TB", "-ac", "1", "-ar", str(rate),
                          "-c:a", "pcm_s16le", str(piece)],
-                        check=True, capture_output=True,
+                        check=True, capture_output=True, stdin=subprocess.DEVNULL,
                     )
                     pieces.append(piece)
                 if not pieces:
@@ -641,13 +814,13 @@ class MiMoVoicePlugin(MaiBotPlugin):
                            "-i", str(listing), "-ac", "1", "-ar", str(rate),
                            "-c:a", "libmp3lame", "-b:a", f"{int(_REFERENCE_BITRATE_KBPS)}k",
                            str(merged)]
-                subprocess.run(command, check=True, capture_output=True)
+                subprocess.run(command, check=True, capture_output=True, stdin=subprocess.DEVNULL)
                 return merged.read_bytes()
-            subprocess.run(command, check=True, capture_output=True)
+            subprocess.run(command, check=True, capture_output=True, stdin=subprocess.DEVNULL)
             if output.is_file() and output.stat().st_size > 0:
                 return output.read_bytes()
         except (OSError, subprocess.SubprocessError) as exc:
-            self.ctx.logger.warning("参考音频预处理失败，回退为原始参考文件：%s", exc)
+            self.ctx.logger.warning("参考音频预处理失败，回退为原始参考文件：%s", _stderr_excerpt(exc))
         return None
 
     def _reference_bytes(self) -> Optional[bytes]:
@@ -665,8 +838,18 @@ class MiMoVoicePlugin(MaiBotPlugin):
             return prepared
         return files[0].read_bytes()
 
+    def _reference_stamp_value(self) -> str:
+        """参考音频的"指纹"：换文件或重新生成后要能让缓存的 data URI 失效。"""
+        try:
+            path = self._reference_path()
+            stat = path.stat()
+        except OSError:
+            return "missing"
+        return f"{path}|{stat.st_mtime_ns}|{stat.st_size}"
+
     async def _ensure_reference_uri(self) -> str:
-        if self._reference_uri:
+        stamp = self._reference_stamp_value()
+        if self._reference_uri and stamp == self._reference_stamp:
             return self._reference_uri
         # ffmpeg 预处理是同步阻塞调用，放到线程里跑，避免卡住 Runner 事件循环。
         payload = await asyncio.to_thread(self._reference_bytes)
@@ -679,6 +862,7 @@ class MiMoVoicePlugin(MaiBotPlugin):
         mime = f"audio/{suffix}" if suffix not in {"mpeg", "m4a"} else "audio/mpeg"
         encoded = base64.b64encode(payload).decode("ascii")
         self._reference_uri = f"data:{mime};base64,{encoded}"
+        self._reference_stamp = stamp
         return self._reference_uri
 
     # ------------------------------------------------------------------- 合成
@@ -742,15 +926,146 @@ class MiMoVoicePlugin(MaiBotPlugin):
             audio = base64.b64decode(audio_b64)
         except (ValueError, TypeError) as exc:
             raise RuntimeError("MiMo TTS 返回的音频不是合法 Base64") from exc
+        return self._validate_audio(audio, self._request_audio_format(), text)
+
+    def _max_audio_seconds(self, text: str) -> float:
+        """按文本长度估算可接受的音频上限：短句 20 秒封底，长句最多放宽到 90 秒。"""
+        estimated = len(text) * _AUDIO_SECONDS_PER_CHAR
+        return min(_AUDIO_SECONDS_CAP, max(_MAX_AUDIO_SECONDS, estimated))
+
+    def _validate_audio(self, audio: bytes, audio_format: str, text: str = "") -> bytes:
+        """拦住空音频、截断音频、几乎无声的音频：发出去只会让用户听到空气。"""
         if len(audio) < _MIN_AUDIO_BYTES:
             raise _RetryableSynthesisError(f"MiMo TTS 返回音频过短（{len(audio)} 字节）")
+        if audio_format != "wav":
+            return audio
+        try:
+            with wave.open(io.BytesIO(audio), "rb") as handle:
+                frames = handle.getnframes()
+                rate = handle.getframerate()
+                width = handle.getsampwidth()
+                channels = handle.getnchannels()
+                raw = handle.readframes(frames)
+        except (wave.Error, EOFError) as exc:
+            raise _RetryableSynthesisError(f"MiMo TTS 返回的 WAV 无法解析（{exc}）") from exc
+        if rate <= 0 or frames <= 0 or not raw:
+            raise _RetryableSynthesisError("MiMo TTS 返回的音频没有采样")
+        duration = frames / float(rate)
+        if duration < _MIN_AUDIO_SECONDS:
+            raise _RetryableSynthesisError(f"MiMo TTS 返回音频过短（{duration:.2f}s）")
+        limit = self._max_audio_seconds(text)
+        if duration > limit:
+            # 确定性错误：重试一次只会得到同样长的音频，直接按失败处理
+            raise RuntimeError(f"MiMo TTS 返回音频过长（{duration:.1f}s，上限 {limit:.0f}s）")
+        if width != 2:
+            return audio
+        try:
+            import numpy as np
+        except ImportError:
+            return audio
+        samples = np.frombuffer(raw, dtype="<i2").astype(np.float32) / 32768.0
+        if samples.size == 0 or channels <= 0:
+            raise _RetryableSynthesisError("MiMo TTS 返回的音频为空")
+        rms = float(np.sqrt(np.mean(np.square(samples))))
+        dbfs = 20.0 * math.log10(max(rms, 1e-9))
+        if dbfs < _MIN_RMS_DBFS:
+            raise _RetryableSynthesisError(f"MiMo TTS 返回的音频几乎无声（{dbfs:.1f} dBFS）")
         return audio
+
+    def _postprocess(self, audio: bytes) -> bytes:
+        """音色对齐 + 尾音裁剪 + 峰值归一 + 尾部补静音，一次读完、一次写回。
+
+        以前是三个函数、两次线程切换、两次 WAV 解析/写回，每条语音多花几十毫秒
+        还刷三条日志；合并后单条只解析一次、只写一次、只打一行。
+        """
+        delivery = self.config.delivery
+        if not self._needs_pcm_processing():
+            return audio
+        try:
+            import numpy as np
+        except ImportError:
+            if not self._finish_warned:
+                self._finish_warned = True
+                self.ctx.logger.warning("后处理需要 numpy，当前环境没有，已跳过音色对齐与尾音处理")
+            return audio
+        try:
+            samples, rate = _read_wav_pcm(audio)
+        except Exception:  # noqa: BLE001 - mp3/坏文件都按原样发出
+            return audio
+        if samples.size == 0 or rate <= 0:
+            return audio
+        before_seconds = samples.size / float(rate)
+        distance_db = None
+        if delivery.timbre_match:
+            target = self._timbre_target()
+            if target is not None:
+                try:
+                    target_arr = np.asarray(target, dtype=np.float32)
+                    curve = _spectral_curve(samples, rate)
+                    gains = np.clip(
+                        (target_arr - curve) * float(delivery.timbre_match_strength), -6.0, 6.0
+                    )
+                    distance_db = float(np.sqrt(np.mean((target_arr - curve) ** 2)))
+                    samples = _apply_gain_curve(samples, rate, gains)
+                except Exception as exc:  # noqa: BLE001
+                    self._warn_timbre_once("音色对齐失败（%s），本条按原样处理", exc)
+        try:
+            if delivery.trim_tail_silence_ms > 0:
+                threshold = 10 ** (_SILENCE_DBFS / 20.0)
+                active = np.flatnonzero(np.abs(samples) > threshold)
+                if active.size:
+                    last = int(active[-1]) + 1
+                    tail_ms = (samples.size - last) / float(rate) * 1000.0
+                    if tail_ms > delivery.trim_tail_silence_ms:
+                        keep = min(samples.size, last + int(rate * _TAIL_KEEP_SECONDS))
+                        samples = samples[:keep]
+            peak = float(np.max(np.abs(samples))) if samples.size else 0.0
+            if delivery.peak_normalize and peak > 1e-6:
+                target_peak = 10 ** (_PEAK_TARGET_DBFS / 20.0)
+                gain = min(max(target_peak / peak, 0.25), 4.0)
+                samples = samples * gain
+                peak = min(1.0, peak * gain)
+            if delivery.tail_pad_ms > 0:
+                pad_frames = int(rate * delivery.tail_pad_ms / 1000.0)
+                if pad_frames > 0:
+                    samples = np.concatenate([samples, np.zeros(pad_frames, dtype=np.float32)])
+            result = _write_wav_pcm(samples, rate)
+        except Exception as exc:  # noqa: BLE001 - 后处理失败不该毁掉这条语音
+            if not self._finish_warned:
+                self._finish_warned = True
+                self.ctx.logger.warning("尾音处理失败（%s），本条按原样发出", exc)
+            return audio
+        peak_dbfs = 20.0 * float(np.log10(peak)) if peak > 1e-9 else -120.0
+        after_seconds = samples.size / float(rate)
+        if distance_db is None:
+            self.ctx.logger.info(
+                "语音后处理：%.2fs → %.2fs，峰值 %.1f dBFS", before_seconds, after_seconds, peak_dbfs
+            )
+        else:
+            self.ctx.logger.info(
+                "语音后处理：音色距离 %.2f dB，%.2fs → %.2fs，峰值 %.1f dBFS",
+                distance_db,
+                before_seconds,
+                after_seconds,
+                peak_dbfs,
+            )
+        return result
 
     # --------------------------------------------------------------- 音色对齐
 
+    def _needs_pcm_processing(self) -> bool:
+        """只要有一个后处理开关打开，就需要 WAV 才能真正生效。"""
+        delivery = self.config.delivery
+        return bool(
+            delivery.timbre_match
+            or delivery.peak_normalize
+            or delivery.trim_tail_silence_ms > 0
+            or delivery.tail_pad_ms > 0
+        )
+
     def _request_audio_format(self) -> str:
-        """音色对齐要处理 PCM，直接向 MiMo 要 WAV；否则按配置。"""
-        if self.config.delivery.timbre_match:
+        """要处理 PCM 时直接向 MiMo 要 WAV；否则按配置（mp3 更省流量）。"""
+        if self._needs_pcm_processing():
             return "wav"
         return self.config.mimo.audio_format
 
@@ -780,28 +1095,6 @@ class MiMoVoicePlugin(MaiBotPlugin):
         self._timbre_warned = True
         self.ctx.logger.warning(message, *args)
 
-    def _match_timbre(self, audio: bytes) -> bytes:
-        """把一条合成音频的频谱往参考音频拉。任何异常都按"原样返回"处理。"""
-        target = self._timbre_target()
-        if target is None:
-            return audio
-        try:
-            import numpy as np
-
-            pcm, rate = _read_wav_pcm(audio)
-            curve = _spectral_curve(pcm, rate)
-            strength = float(self.config.delivery.timbre_match_strength)
-            gains = np.clip((np.asarray(target, dtype=np.float32) - curve) * strength, -6.0, 6.0)
-            before = float(np.sqrt(np.mean((np.asarray(target, dtype=np.float32) - curve) ** 2)))
-            matched = _apply_gain_curve(pcm, rate, gains)
-            after_curve = _spectral_curve(matched, rate)
-            after = float(np.sqrt(np.mean((np.asarray(target, dtype=np.float32) - after_curve) ** 2)))
-            self.ctx.logger.info("音色对齐：频谱距离 %.2f → %.2f dB", before, after)
-            return _write_wav_pcm(matched, rate)
-        except Exception as exc:  # noqa: BLE001
-            self.ctx.logger.warning("音色对齐失败（%s），按原始音频发送", exc)
-            return audio
-
     async def _synthesize_once(self, text: str, timeout: float) -> bytes:
         """合成一次；超时按 retry_on_timeout 最多再重来一次。
 
@@ -826,26 +1119,25 @@ class MiMoVoicePlugin(MaiBotPlugin):
         backoff = max(0.0, float(self.config.mimo.retry_backoff_seconds))
         last_error: Optional[BaseException] = None
         for attempt in range(attempts + 1):
-            if self._synthesis_slots.locked():
-                if self.config.delivery.skip_when_busy:
-                    raise _SynthesisBusy("已有语音正在合成")
-                await self._synthesis_slots.acquire()
-                acquired = True
-            else:
-                await self._synthesis_slots.acquire()
-                acquired = True
+            if self._synthesis_slots.locked() and self.config.delivery.skip_when_busy:
+                raise _SynthesisBusy("已有语音正在合成")
+            # 并发没满时 acquire 是即时的；满了且允许排队时在这里等
+            await self._synthesis_slots.acquire()
+            retryable: Optional[BaseException] = None
             try:
                 return await self._synthesize_once(text, timeout)
             except (_RetryableSynthesisError, aiohttp.ClientError) as exc:
                 last_error = exc
-                if attempt >= attempts:
-                    break
-                await asyncio.sleep(backoff * (2 ** attempt))
+                if attempt < attempts:
+                    retryable = exc
             except Exception as exc:  # noqa: BLE001 - 交给上层统一降级
                 raise RuntimeError(f"语音合成失败: {exc}") from exc
             finally:
-                if acquired:
-                    self._synthesis_slots.release()
+                # 先释放槽位再退避，否则退避期间别的聊天流会一直被判"忙"
+                self._synthesis_slots.release()
+            if retryable is None:
+                break
+            await asyncio.sleep(backoff * (2 ** attempt))
         raise RuntimeError(f"语音合成失败: {last_error}")
 
     # ------------------------------------------------------------------- 文本清洗
@@ -925,9 +1217,22 @@ class MiMoVoicePlugin(MaiBotPlugin):
             ident = user_id
             listed = ident in self._normalize_ids(self.config.filters.private_user_ids)
         if not ident:
-            # 拿不到对方身份（映射过期等）时保守处理：保持文字，避免误放行
+            # 拿不到对方身份（入站映射过期等）：whitelist 保守拦截；
+            # blacklist 无法确认命中就放行，否则私聊语音会在闲置 12 小时后静默失效
+            if mode == "blacklist":
+                self._warn_filter_once(scope)
+                return True
             return False
         return listed if mode == "whitelist" else not listed
+
+    def _warn_filter_once(self, scope: str) -> None:
+        if scope in self._filter_warned:
+            return
+        self._filter_warned.add(scope)
+        self.ctx.logger.warning(
+            "%s 的对方身份未知（入站映射已过期），按 blacklist 规则放行；如需严格拦截请用 whitelist",
+            scope,
+        )
 
     def _remember_scope(self, scope: str, session_id: str, group_id: str, user_id: str) -> None:
         if not session_id:
@@ -935,7 +1240,21 @@ class MiMoVoicePlugin(MaiBotPlugin):
         now = time.monotonic()
         if len(self._scope_cache) > _SCOPE_MAX_ENTRIES:
             self._scope_cache = {key: value for key, value in self._scope_cache.items() if value[0] > now}
+            if len(self._scope_cache) > _SCOPE_MAX_ENTRIES:
+                self._scope_cache.clear()
         self._scope_cache[session_id] = (now + _SCOPE_TTL_SECONDS, {"scope": scope, "group_id": group_id, "user_id": user_id})
+
+    @staticmethod
+    def _prune_ttl_cache(cache: Dict[str, float]) -> None:
+        """TTL 字典兜底：超过上限先清过期项，还超就直接清空（这些缓存丢了只是多抽一次签）。"""
+        if len(cache) <= _CACHE_MAX_ENTRIES:
+            return
+        now = time.monotonic()
+        for key, expires_at in list(cache.items()):
+            if expires_at <= now:
+                cache.pop(key, None)
+        if len(cache) > _CACHE_MAX_ENTRIES:
+            cache.clear()
 
     def _lookup_scope(self, session_id: str) -> Dict[str, str]:
         entry = self._scope_cache.get(session_id)
@@ -1002,8 +1321,12 @@ class MiMoVoicePlugin(MaiBotPlugin):
             return entry[1]
         enabled = random.random() < float(self.config.trigger.probability)
         self._random_decisions[stream_id] = (now + float(self.config.trigger.decision_ttl), enabled)
-        if len(self._random_decisions) > _SCOPE_MAX_ENTRIES:
-            self._random_decisions = {key: value for key, value in self._random_decisions.items() if value[0] >= now}
+        if len(self._random_decisions) > _CACHE_MAX_ENTRIES:
+            self._random_decisions = {
+                key: value for key, value in self._random_decisions.items() if value[0] >= now
+            }
+            if len(self._random_decisions) > _CACHE_MAX_ENTRIES:
+                self._random_decisions.clear()
         return enabled
 
     def _llm_voice_request_active(self, stream_id: str) -> bool:
@@ -1064,7 +1387,8 @@ class MiMoVoicePlugin(MaiBotPlugin):
     async def convert_outbound_text(self, message: Optional[Dict[str, Any]] = None, **kwargs: Any) -> Optional[Dict[str, Any]]:
         if not self.config.plugin.enabled:
             return None
-        outbound = message if isinstance(message, dict) else {}
+        # 拷一份再改：宿主传进来的 dict 可能还被后续 hook/观察者使用
+        outbound = copy.deepcopy(message) if isinstance(message, dict) else {}
         text = self._plain_text_message(outbound)
         if text is None:
             return None
@@ -1094,8 +1418,8 @@ class MiMoVoicePlugin(MaiBotPlugin):
             self.ctx.logger.warning("语音合成失败（%s），%s", exc, "回退文字" if self.config.delivery.fallback_to_text else "拦截消息")
             return None if self.config.delivery.fallback_to_text else {"action": "abort"}
 
-        if self.config.delivery.timbre_match:
-            audio = await asyncio.to_thread(self._match_timbre, audio)
+        # 音色对齐、尾音裁剪、峰值归一合并成一次线程调用（见 _postprocess）
+        audio = await asyncio.to_thread(self._postprocess, audio)
 
         outbound["raw_message"] = [
             {
@@ -1111,9 +1435,11 @@ class MiMoVoicePlugin(MaiBotPlugin):
         kwargs["message"] = outbound
         kwargs["set_reply"] = False
         kwargs["reply_message_id"] = ""
-        # 模型的一次性语音许可用掉就清掉，避免影响下一轮
+        # 模型的一次性语音许可、文字许可，以及这次随机抽签都用掉即清：
+        # 不清的话 decision_ttl 内同一条聊天流的每条回复都会继续转语音（线上出现过 10 秒内连发两条）
         self._llm_voice_requests.pop(stream_id, None)
         self._text_override_sessions.pop(stream_id, None)
+        self._random_decisions.pop(stream_id, None)
         if had_reply:
             self.ctx.logger.info("QQ 语音不支持引用组合，已移除会话 %s 的引用段", stream_id)
         self.ctx.logger.info("已将会话 %s 的纯文本回复替换为语音（%d 字）", stream_id, len(prepared))
@@ -1171,6 +1497,7 @@ class MiMoVoicePlugin(MaiBotPlugin):
         if not stream_id:
             return {"success": False, "content": "无法获取真实聊天流 session_id"}
         self._text_override_sessions[stream_id] = time.monotonic() + float(self.config.trigger.decision_ttl)
+        self._prune_ttl_cache(self._text_override_sessions)
         self._llm_voice_requests.pop(stream_id, None)
         return {"success": True, "content": "这一轮将使用文字回复。"}
 
@@ -1186,6 +1513,7 @@ class MiMoVoicePlugin(MaiBotPlugin):
         if not stream_id:
             return {"success": False, "content": "无法获取真实聊天流 session_id"}
         self._llm_voice_requests[stream_id] = time.monotonic() + float(self.config.trigger.decision_ttl)
+        self._prune_ttl_cache(self._llm_voice_requests)
         self._text_override_sessions.pop(stream_id, None)
         return {"success": True, "content": "这一轮会用语音回复，正常给出回复内容即可。"}
 

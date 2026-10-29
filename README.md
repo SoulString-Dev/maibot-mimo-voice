@@ -109,7 +109,7 @@ private_mode = "all"
 
 `group_mode` 与 `private_mode` 都不是 `all` 时，插件会记录入站消息的群号 / 对方 QQ 号（`chat.receive.before_process`），出站时按名单判断；两者都是 `all` 时不记录，零额外开销。拿不到对方身份时（映射过期等）一律保持文字，不误放行。
 
-## 配置说明（共 33 项，日常只需动前 12 项）
+## 配置说明（共 37 项，日常只需动前 12 项）
 
 ### 基础
 
@@ -134,8 +134,8 @@ private_mode = "all"
 
 | 配置 | 默认 | 说明 |
 |---|---|---|
-| `plugin.config_version` | `0.3.1` | 配置版本号（内部使用，无需修改） |
-| `mimo.api_base_url` | `https://api.xiaomimimo.com/v1` | 只填可信地址 |
+| `plugin.config_version` | `0.5.0` | 配置版本号（内部使用，无需修改） |
+| `mimo.api_base_url` | `https://api.xiaomimimo.com/v1` | 必须是 https 公网地址；写成内网/本机地址会自动回退官方地址并告警 |
 | `mimo.model` | `mimo-v2.5-tts-voiceclone` | 也可用 `mimo-v2.5-tts`（预置音色） |
 | `mimo.audio_format` | `mp3` | `mp3` / `wav` |
 | `mimo.max_concurrent` | `1` | 同时合成路数，建议保持 1 |
@@ -143,12 +143,16 @@ private_mode = "all"
 | `mimo.retry_on_timeout` | `true` | 单次合成超时后换一次请求重来（只重试一次） |
 | `mimo.retry_backoff_seconds` | `1.5` | 重试退避基数，按 2 的幂增长 |
 | `mimo.connect_timeout` | `10.0` | 建连超时（秒），与整体超时分开 |
+| `mimo.allow_private_base_url` | `false` | 允许把音频发往内网/本机地址（只有自建代理时才需要） |
 | `voice.reference_path` | `reference.wav` | 仅 `preset = custom` 时生效，填 `references/` 下的文件名 |
 | `voice.reference_strategy` | `single_file` | 需要 ffmpeg 的策略：`best_single` / `balanced` / `full_merge` |
 | `trigger.decision_ttl` | `10.0` | 判定有效期（秒） |
 | `trigger.overflow_policy` | `text` | 超长时：`text` 保留文字；`truncate` 截断后合成 |
 | `trigger.english_policy` | `strip_tics` | `keep` 原样念；`strip_tics` 只删复读口癖；`strip` 删所有拉丁串（会误伤真词） |
 | `trigger.random_requires_chinese` | `true` | 随机路径遇英文改发文字 |
+| `delivery.trim_tail_silence_ms` | `250` | 尾部静音超过这个毫秒数就裁掉（只留 50ms），0 = 不裁 |
+| `delivery.tail_pad_ms` | `120` | 处理完后补多少毫秒尾静音，避免播放端吃掉最后一个字 |
+| `delivery.peak_normalize` | `true` | 把峰值统一拉到 −1.5 dBFS，解决有的条小声有的条刺耳 |
 | `filters.group_mode` | `all` | 群聊放行：`all` / `whitelist` / `blacklist` |
 | `filters.private_mode` | `all` | 私聊放行：`all` / `whitelist` / `blacklist` |
 | `filters.group_ids` | `[]` | 群号列表 |
@@ -167,6 +171,7 @@ private_mode = "all"
 | 10-26 | 410 | 28 | 6.8% |
 | 10-27 | 427 | 43 | 10.1% |
 | 10-28 | 354 | 51 | 14.4% |
+| 10-29（到 14:40） | 358 | 50 | 14.0% |
 
 **为什么 10-27 的占比突然上来了？** 不是因为 bot 变得更爱说话，而是 10-26 那次上游抖动把语音吃掉了：
 
@@ -175,7 +180,7 @@ private_mode = "all"
   失败会回退成文字，所以 10-26 的抽中量被消耗掉近一半，表里只剩 6.8%。
 - 一个小放大器：`trigger.decision_ttl = 10` 让同一个聊天流在 10 秒内复用上一次的抽签结果，实测 20% 的语音与同会话上一条语音相隔 ≤10 秒 —— 偶尔一次"中签"会连着出两条。
 
-0.3.0（10-26 22:21）上线后到 10-28 结束共 **94 条**语音：
+0.3.0（10-26 22:21）上线后到 10-29 下午共 **144 条**语音：
 
 - 含拉丁字母 **0 条**，含 `ww` / `emmm` / `ohhh` 口癖 **0 条**（此前两天分别是 9 条和 4 条）。
 - 全部为单段 `voice`，没有引用段残留（QQ 不支持「引用 + 语音」）。
@@ -183,6 +188,41 @@ private_mode = "all"
 
 合成失败全部是 `20s` 超时后的回退：10-26 占 41%、10-27 占 21%，都集中在上游变慢的窗口；
 0.3.1（10-28 凌晨）加上超时重试后，10-28 全天 0 失败（重试只被用上 1 次）。
+
+## 目录结构
+
+```
+<插件目录>/
+├── plugin.py
+├── config.example.toml
+├── _manifest.json
+├── assets/icon.svg              # 商店图标
+├── reference-bingtang.wav       # 内置参考（随插件发布）
+├── reference-jasmine.wav
+└── test.wav                     # 你自己的参考（仅本机，已被 .gitignore 忽略）
+
+<插件数据目录>/                   # 宿主提供，升级不会覆盖
+└── references/                  # 自定义参考统一放这里
+    └── my-voice.wav
+```
+
+数据目录一般位于 `data/plugins/<插件 id>/`，启动日志会打印一行 `参考音频目录：...`。
+`voice.reference_path` 只写文件名（例如 `my-voice.wav`），插件会先找数据目录，再回退插件根目录（兼容旧版布局）。
+
+## FAQ
+
+**为什么这条回复没出语音？** 随机模式下要同时满足四条：
+
+1. `trigger.probability` 抽中（默认 15%）；
+2. 文本不超过 `trigger.short_reply_max_chars`（默认 60 字）；
+3. 文本里没有 2 个以上连续英文（`trigger.random_requires_chinese`）；
+4. 该群 / 私聊在 `filters` 放行名单里。
+
+模型主动请求（`random_llm` 模式的 `mimo_voice_say`）只跳过第 2 条，其余仍生效。
+
+**明明抽中了，收到的却是文字？** 合成超时（默认 20 秒）、上游 5xx、返回静音或音频异常都会回退文字，日志里有一行 `语音合成失败（...），回退文字`。
+
+**听起来不像参考音频？** 参考换成 3–10 秒、安静环境、单人、无背景音乐的干声；`delivery.timbre_match` 默认开启，能补一部分频谱差，但补不了混响和削顶失真。
 
 ## 已知限制
 
@@ -195,7 +235,6 @@ private_mode = "all"
 ## 隐私
 
 参考音频只保存在本地（插件目录，或插件数据目录下的 `references/`）；使用 ffmpeg 参考策略时，处理结果缓存在宿主提供的 runtime 目录下的 `reference-cache/`（拿不到时退回插件目录）。
-eferences/），不会上传到除 MiMo TTS 之外的任何地方；使用 ffmpeg 参考策略时，处理结果缓存在宿主提供的 runtime 目录下的 `reference-cache/`（拿不到时退回插件目录）。
 
 除了随请求发给你配置的 TTS 服务（当前实现为小米 MiMo 官方 API：待合成文本与参考音频会发往 `api.xiaomimimo.com`）外，不会上传到任何地方。`mimo.api_base_url` 决定请求发往哪里，请只填写可信地址。
 
@@ -213,6 +252,14 @@ eferences/），不会上传到除 MiMo TTS 之外的任何地方；使用 ffmpe
 宿主机没有 `ffmpeg` 时，插件会在加载时退回 `single_file`，不会报错。
 
 ## 更新日志
+
+### 0.5.0
+
+- `mimo.api_base_url` 增加校验：只接受 https 公网地址；指向本机、内网、链路本地或云元数据时自动回退官方地址并在启动日志告警。自建代理可显式打开 `mimo.allow_private_base_url`。
+- 新增合成结果校验：时长 0.3–20 秒、RMS > −40 dBFS、WAV 头可解析；静音、截断、超长一律按失败处理并回退文字。
+- 新增尾部处理三件套：`delivery.trim_tail_silence_ms`（默认 250，裁掉多余尾静音）、`delivery.tail_pad_ms`（默认 120，补一点尾巴防播放端吃字）、`delivery.peak_normalize`（默认开，峰值统一到 −1.5 dBFS）。
+- 新增插件图标（`assets/icon.svg`），商店详情页会显示。
+- README 增加「目录结构」与 FAQ；修正隐私段的一处排版错乱。
 
 ### 0.4.0
 
