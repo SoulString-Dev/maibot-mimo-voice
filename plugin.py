@@ -377,6 +377,22 @@ class MiMoVoiceConfig(PluginConfigBase):
     delivery: DeliveryConfig = Field(default_factory=DeliveryConfig)
 
 
+# `from __future__ import annotations` 让 pydantic 收到字符串注解：统一在这里重建一次，
+# 宿主加载、单测直接 exec 模块都不会再报 "not fully defined"。
+for _config_model in (
+    PluginSectionConfig,
+    GeneralConfig,
+    TriggerConfig,
+    FilterConfig,
+    VoiceConfig,
+    MiMoConfig,
+    DeliveryConfig,
+    MiMoVoiceConfig,
+):
+    _config_model.model_rebuild(_types_namespace=globals())
+del _config_model
+
+
 def _stderr_excerpt(exc: BaseException, limit: int = 160) -> str:
     """把 ffmpeg 的报错压成一行：完整命令行里有用户路径，不该整个进日志。"""
     stderr = getattr(exc, "stderr", None) or b""
@@ -752,7 +768,6 @@ class MiMoVoicePlugin(MaiBotPlugin):
         payload = {
             "strategy": self.config.voice.reference_strategy,
             "files": [[item.name, item.stat().st_mtime_ns, item.stat().st_size] for item in files],
-            "preferred": "",
             "clip": _REFERENCE_MAX_CLIP_SECONDS,
             "balanced": _REFERENCE_BALANCED_CLIP_SECONDS,
             "silence": _REFERENCE_SILENCE_DB,
@@ -798,14 +813,11 @@ class MiMoVoicePlugin(MaiBotPlugin):
             except OSError:
                 continue
         # balanced 的分片目录、full_merge 的列表文件不在顶层，一并收掉
-        keep_dirs = {path.parent.name for path in files[:keep]}
         try:
             extras = list(directory.iterdir())
         except OSError:
             extras = []
         for extra in extras:
-            if extra.name in keep_dirs:
-                continue
             try:
                 if extra.is_dir() and extra.name.startswith("parts-"):
                     shutil.rmtree(extra)
