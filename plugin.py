@@ -39,6 +39,22 @@ from pydantic import model_validator
 from maibot_sdk import CONFIG_RELOAD_SCOPE_SELF, Field, HookHandler, MaiBotPlugin, PluginConfigBase, Tool
 from maibot_sdk.types import ErrorPolicy, HookMode, HookOrder
 
+_NUMPY_MODULE: Any = None
+_NUMPY_TRIED = False
+
+
+def _numpy() -> Any:
+    """按需导入 numpy（可选依赖），失败返回 None 并记住结果。"""
+    global _NUMPY_MODULE, _NUMPY_TRIED
+    if not _NUMPY_TRIED:
+        _NUMPY_TRIED = True
+        try:
+            import numpy as np
+        except ImportError:  # pragma: no cover - 正常安装都有 numpy
+            np = None
+        _NUMPY_MODULE = np
+    return _NUMPY_MODULE
+
 SUPPORTED_REFERENCE_SUFFIXES = {".aac", ".flac", ".m4a", ".mp3", ".mpeg", ".ogg", ".opus", ".wav", ".wma"}
 VOICE_SEGMENT_TYPE = "voice"
 DEFAULT_STYLE_INSTRUCTION = "用同一个人的音色说话，像平时聊天一样语速稍快、句子连贯，不要拖长尾音，情绪自然。"
@@ -384,8 +400,9 @@ def _concat_path(path: Path) -> str:
 
 
 def _timbre_band_edges() -> Any:
-    import numpy as np
-
+    np = _numpy()
+    if np is None:  # pragma: no cover
+        raise RuntimeError("音色对齐需要 numpy")
     return np.logspace(np.log10(60.0), np.log10(12000.0), 31)
 
 
@@ -398,8 +415,9 @@ def _band_matrix(frame: int, rate: int) -> Tuple[Any, Any]:
     以前每个音频要重建两次（算曲线一次、应用增益一次），矩阵本身与音频无关，
     缓存后单条语音能省掉两次 30×1025 的构造。
     """
-    import numpy as np
-
+    np = _numpy()
+    if np is None:  # pragma: no cover
+        raise RuntimeError("音色对齐需要 numpy")
     key = (int(frame), int(rate))
     cached = _BAND_MATRIX_CACHE.get(key)
     if cached is not None:
@@ -419,7 +437,9 @@ def _band_matrix(frame: int, rate: int) -> Tuple[Any, Any]:
 
 def _spectral_curve(pcm: Any, rate: int) -> Any:
     """返回长度 30 的相对频谱曲线（dB，已按 600–2500Hz 中位数归零）。"""
-    import numpy as np
+    np = _numpy()
+    if np is None:  # pragma: no cover
+        raise RuntimeError("音色对齐需要 numpy")
 
     frame = 2048
     if len(pcm) < frame * 2:
@@ -445,7 +465,9 @@ def _spectral_curve(pcm: Any, rate: int) -> Any:
 
 def _apply_gain_curve(pcm: Any, rate: int, gains_db: Any) -> Any:
     """用 STFT 把频带增益应用到时域，返回与输入等长、音量不增的信号。"""
-    import numpy as np
+    np = _numpy()
+    if np is None:  # pragma: no cover
+        raise RuntimeError("音色对齐需要 numpy")
 
     frame = 2048
     if len(pcm) < frame * 2:
@@ -472,10 +494,9 @@ def _apply_gain_curve(pcm: Any, rate: int, gains_db: Any) -> Any:
 
 
 def _read_wav_pcm(audio: bytes) -> Tuple[Any, int]:
-    import io
-    import wave
-
-    import numpy as np
+    np = _numpy()
+    if np is None:  # pragma: no cover
+        raise RuntimeError("音频处理需要 numpy")
 
     with wave.open(io.BytesIO(audio), "rb") as fh:
         rate = fh.getframerate()
@@ -491,10 +512,9 @@ def _read_wav_pcm(audio: bytes) -> Tuple[Any, int]:
 
 
 def _write_wav_pcm(pcm: Any, rate: int) -> bytes:
-    import io
-    import wave
-
-    import numpy as np
+    np = _numpy()
+    if np is None:  # pragma: no cover
+        raise RuntimeError("音频处理需要 numpy")
 
     data = np.clip(np.asarray(pcm, dtype=np.float32), -1.0, 1.0)
     raw = (data * 32767.0).astype("<i2").tobytes()
@@ -523,9 +543,7 @@ class MiMoVoicePlugin(MaiBotPlugin):
         self._reference_stamp: str = ""
         self._reference_signature: Optional[str] = None
         self._timbre_target_cache: Optional[List[float]] = None
-        self._timbre_warned = False
-        self._finish_warned = False
-        self._filter_warned: set[str] = set()
+        self._warned: set[str] = set()
         self._synthesis_slots = asyncio.Semaphore(1)
 
     # ------------------------------------------------------------------ 生命周期
@@ -578,9 +596,25 @@ class MiMoVoicePlugin(MaiBotPlugin):
             )
 
     def _flush_config_warnings(self) -> None:
-        """把本轮配置校验攒下的告警打一次就清空，避免下次热重载重复打印旧告警。"""
-        for warning in _CONFIG_WARNINGS[-5:]:
+        """把本轮配置校验攒下的告警按类别去重后打一次就清空。
+
+        同一节里多个字段同时填错时，避免刷出一屏相似的 warning：
+        每类（按冒号前的字段分组）只打第一条，最多 5 类，其余汇总成一行。
+        """
+        shown: set[str] = set()
+        buckets = 0
+        for warning in list(_CONFIG_WARNINGS):
+            key = warning.split(":", 1)[0]
+            if key in shown:
+                continue
+            shown.add(key)
+            if buckets >= 5:
+                continue
+            buckets += 1
             self.ctx.logger.warning(warning)
+        hidden = len(shown) - buckets
+        if hidden > 0:
+            self.ctx.logger.warning("另有 %d 类配置告警未展开，详见 config.toml 与插件文档", hidden)
         _CONFIG_WARNINGS.clear()
 
     async def on_unload(self) -> None:
@@ -598,9 +632,7 @@ class MiMoVoicePlugin(MaiBotPlugin):
         self._reference_stamp = ""
         self._reference_signature = None
         self._timbre_target_cache = None
-        self._timbre_warned = False
-        self._finish_warned = False
-        self._filter_warned.clear()
+        self._warned.clear()
         self._synthesis_slots = asyncio.Semaphore(max(1, int(self.config.mimo.max_concurrent)))
         self.ctx.logger.info("MiMo 语音插件配置已热更新")
         self._flush_config_warnings()
@@ -641,7 +673,13 @@ class MiMoVoicePlugin(MaiBotPlugin):
         name = (raw or "").strip() or default_name
         parts = Path(name).parts
         if Path(name).is_absolute() or ".." in parts:
-            self.ctx.logger.warning("%s 只接受相对路径（%s），已回退为默认的 %s", label, name, default_name)
+            self._warn_once(
+                f"path:{label}:{name}",
+                "%s 只接受相对路径（%s），已回退为默认的 %s",
+                label,
+                name,
+                default_name,
+            )
             name = default_name
         fallback: Optional[Path] = None
         for root in self._user_roots():
@@ -673,7 +711,12 @@ class MiMoVoicePlugin(MaiBotPlugin):
             candidate = self._preset_path(preset_file)
             if candidate is not None:
                 return candidate
-            self.ctx.logger.warning("内置音色 %s 的参考音频缺失（%s），回退到 voice.reference_path", preset, preset_file)
+            self._warn_once(
+                f"builtin:{preset}",
+                "内置音色 %s 的参考音频缺失（%s），回退到 voice.reference_path",
+                preset,
+                preset_file,
+            )
         return self._locate_user_file(self.config.voice.reference_path, "reference.wav", "voice.reference_path")
 
     def _voice_dir(self) -> Path:
@@ -779,7 +822,7 @@ class MiMoVoicePlugin(MaiBotPlugin):
             subprocess.run(command, check=True, capture_output=True, stdin=subprocess.DEVNULL)
             return True
         except (OSError, subprocess.SubprocessError) as exc:
-            self.ctx.logger.warning("参考音频%s失败：%s", what, _stderr_excerpt(exc))
+            self._warn_once(f"ffmpeg:{what}", "参考音频%s失败：%s", what, _stderr_excerpt(exc))
             return False
 
     def _encode_reference(self, source: Path, output: Path, filter_chain: str, what: str) -> bool:
@@ -989,9 +1032,8 @@ class MiMoVoicePlugin(MaiBotPlugin):
             raise RuntimeError(f"MiMo TTS 返回音频过长（{duration:.1f}s，上限 {limit:.0f}s）")
         if width != 2:
             return audio
-        try:
-            import numpy as np
-        except ImportError:
+        np = _numpy()
+        if np is None:
             return audio
         samples = np.frombuffer(raw, dtype="<i2").astype(np.float32) / 32768.0
         if samples.size == 0 or channels <= 0:
@@ -1012,12 +1054,9 @@ class MiMoVoicePlugin(MaiBotPlugin):
         delivery = self.config.delivery
         if not self._needs_pcm_processing():
             return audio
-        try:
-            import numpy as np
-        except ImportError:
-            if not self._finish_warned:
-                self._finish_warned = True
-                self.ctx.logger.warning("后处理需要 numpy，当前环境没有，已跳过音色对齐与尾音处理")
+        np = _numpy()
+        if np is None:
+            self._warn_once("numpy:post", "后处理需要 numpy，当前环境没有，已跳过音色对齐与尾音处理")
             return audio
         try:
             samples, rate = _read_wav_pcm(audio)
@@ -1070,9 +1109,7 @@ class MiMoVoicePlugin(MaiBotPlugin):
                     changed = True
             result = _write_wav_pcm(samples, rate)
         except Exception as exc:  # noqa: BLE001 - 后处理失败不该毁掉这条语音
-            if not self._finish_warned:
-                self._finish_warned = True
-                self.ctx.logger.warning("尾音处理失败（%s），本条按原样发出", exc)
+            self._warn_once("post:tail", "尾音处理失败（%s），本条按原样发出", exc)
             return audio
         if not changed and distance_db is None:
             self.ctx.logger.debug(
@@ -1118,25 +1155,24 @@ class MiMoVoicePlugin(MaiBotPlugin):
             return self._timbre_target_cache
         path = self._reference_path()
         if path.suffix.lower() != ".wav":
-            self._warn_timbre_once("音色对齐需要 WAV 参考音频（当前 %s），本次按关闭处理", path.name)
+            self._warn_once("timbre:format", "音色对齐需要 WAV 参考音频（当前 %s），本次按关闭处理", path.name)
             return None
-        try:
-            import numpy  # noqa: F401
-        except ImportError:
-            self._warn_timbre_once("音色对齐需要 numpy，当前环境没有，按关闭处理")
+        if _numpy() is None:
+            self._warn_once("numpy:timbre", "音色对齐需要 numpy，当前环境没有，按关闭处理")
             return None
         try:
             pcm, rate = _read_wav_pcm(path.read_bytes())
         except Exception as exc:  # noqa: BLE001
-            self._warn_timbre_once("音色对齐读取参考音频失败（%s），按关闭处理", exc)
+            self._warn_once("timbre:read", "音色对齐读取参考音频失败（%s），按关闭处理", exc)
             return None
         self._timbre_target_cache = _spectral_curve(pcm, rate).tolist()
         return self._timbre_target_cache
 
-    def _warn_timbre_once(self, message: str, *args: Any) -> None:
-        if self._timbre_warned:
+    def _warn_once(self, key: str, message: str, *args: Any) -> None:
+        """同一类告警只打一次；key 用于区分，热重载后自动重置。"""
+        if key in self._warned:
             return
-        self._timbre_warned = True
+        self._warned.add(key)
         self.ctx.logger.warning(message, *args)
 
     async def _synthesize_once(self, text: str, timeout: float) -> bytes:
@@ -1202,6 +1238,8 @@ class MiMoVoicePlugin(MaiBotPlugin):
         cleaned = re.sub(r"[「」『』“”‘’\"'（）()【】\[\]《》〈〉]", "", cleaned)
         cleaned = cleaned.replace("\u3000", " ")
         cleaned = re.sub(r"\s+", " ", cleaned).strip()
+        # 去掉 URL/英文口癖后常留下"看这个 吧"这类空格：中文之间不需要空格，朗读时会变成多余停顿
+        cleaned = re.sub(r"(?<=[\u4e00-\u9fff\uff0c\u3002\uff01\uff1f])\s+(?=[\u4e00-\u9fff])", "", cleaned)
         cleaned = _LEAD_NOISE_PATTERN.sub("", cleaned)
         cleaned = _TAIL_NOISE_PATTERN.sub("", cleaned)
         cleaned = re.sub(r"[~～]+", "，", cleaned)
@@ -1234,13 +1272,24 @@ class MiMoVoicePlugin(MaiBotPlugin):
             return True
         return False
 
+    @staticmethod
+    def _touches_digit(text: str, match: Any) -> bool:
+        """拉丁串紧挨着数字时不当作口癖（ff14、mp3、b站25 这类是型号不是语气）。"""
+        start, end = match.span()
+        before = text[start - 1] if start > 0 else ""
+        after = text[end] if end < len(text) else ""
+        return before.isdigit() or after.isdigit()
+
     def _apply_english_policy(self, text: str) -> str:
         policy = self.config.trigger.english_policy
         if policy == "keep":
             return text
         if policy == "strip":
             return _LATIN_PATTERN.sub("", text)
-        return _LATIN_PATTERN.sub(lambda m: "" if self._is_tic_token(m.group(0)) else m.group(0), text)
+        return _LATIN_PATTERN.sub(
+            lambda m: "" if self._is_tic_token(m.group(0)) and not self._touches_digit(text, m) else m.group(0),
+            text,
+        )
 
     # ------------------------------------------------------------------- 过滤
 
@@ -1264,19 +1313,14 @@ class MiMoVoicePlugin(MaiBotPlugin):
             # 拿不到对方身份（入站映射过期等）：whitelist 保守拦截；
             # blacklist 无法确认命中就放行，否则私聊语音会在闲置 12 小时后静默失效
             if mode == "blacklist":
-                self._warn_filter_once(scope)
+                self._warn_once(
+                    f"filter:{scope}",
+                    "%s 的对方身份未知（入站映射已过期），按 blacklist 规则放行；如需严格拦截请用 whitelist",
+                    scope,
+                )
                 return True
             return False
         return listed if mode == "whitelist" else not listed
-
-    def _warn_filter_once(self, scope: str) -> None:
-        if scope in self._filter_warned:
-            return
-        self._filter_warned.add(scope)
-        self.ctx.logger.warning(
-            "%s 的对方身份未知（入站映射已过期），按 blacklist 规则放行；如需严格拦截请用 whitelist",
-            scope,
-        )
 
     def _remember_scope(self, scope: str, session_id: str, group_id: str, user_id: str) -> None:
         if not session_id:

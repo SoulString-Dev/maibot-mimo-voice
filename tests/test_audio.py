@@ -1,0 +1,115 @@
+"""音频侧测试：合成结果校验、后处理（尾静音/补尾/峰值）、缓存清理。"""
+from __future__ import annotations
+
+import math
+import os
+import sys
+import tempfile
+import wave
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from __bootstrap import Checker, load_plugin, make_plugin  # noqa: E402
+
+module = load_plugin()
+checker = Checker("音频侧")
+np = module._numpy()
+checker.check("容器 / 本机有 numpy", np is not None)
+
+
+def _catch(fn) -> str:
+    """执行并把异常压成稳定标签，便于断言。"""
+    try:
+        fn()
+    except module._RetryableSynthesisError as exc:
+        text = str(exc)
+        return "过短" if "过短" in text else ("几乎无声" if "无声" in text else text)
+    except RuntimeError as exc:
+        return "过长:RuntimeError" if "过长" in str(exc) else "RuntimeError"
+    return "ok"
+
+
+def make_wav(seconds: float, rate: int = 24000, amplitude: float = 0.25, freq: float = 220.0) -> bytes:
+    """生成一段正弦波 WAV（16-bit 单声道）。"""
+    frames = int(seconds * rate)
+    samples = np.sin(2 * math.pi * freq * np.arange(frames) / rate).astype(np.float32) * amplitude
+    return module._write_wav_pcm(samples, rate)
+
+
+def parse(wav_bytes: bytes):
+    pcm, rate = module._read_wav_pcm(wav_bytes)
+    return pcm, rate
+
+
+def with_silence_tail(seconds: float = 0.6, body: float = 1.0) -> bytes:
+    body_pcm, rate = parse(make_wav(body))
+    silence = np.zeros(int(rate * seconds), dtype=np.float32)
+    return module._write_wav_pcm(np.concatenate([body_pcm, silence]), rate)
+
+
+# ---------------------------------------------------------------- 结果校验
+plugin, _, _ = make_plugin(module)
+
+checker.equal("短字节直接判失败", _catch(lambda: plugin._validate_audio(b"RIFF", "wav")), "过短")
+checker.equal("0.1 秒判失败", _catch(lambda: plugin._validate_audio(make_wav(0.1), "wav", "早")), "过短")
+checker.equal("静音判失败", _catch(lambda: plugin._validate_audio(make_wav(1.0, amplitude=0.00001), "wav", "早")), "几乎无声")
+checker.equal("正常音频通过", _catch(lambda: plugin._validate_audio(make_wav(1.0), "wav", "早")), "ok")
+checker.equal("mp3 直通不解析", _catch(lambda: plugin._validate_audio(b"ID3" + b"x" * 900, "mp3", "早")), "ok")
+checker.equal(
+    "超长音频按不可重试处理",
+    _catch(lambda: plugin._validate_audio(make_wav(30.0), "wav", "早")),
+    "过长:RuntimeError",
+)
+
+checker.equal("10 字下限 20s", plugin._max_audio_seconds("早"), 20.0)
+checker.equal("100 字约 70s", plugin._max_audio_seconds("啊" * 100), 70.0)
+checker.equal("300 字封顶 90s", plugin._max_audio_seconds("啊" * 300), 90.0)
+
+# ---------------------------------------------------------------- 后处理
+inst, _, logger = make_plugin(module)
+inst.config.delivery.trim_tail_silence_ms = 250
+inst.config.delivery.tail_pad_ms = 120
+inst.config.delivery.peak_normalize = True
+inst.config.delivery.timbre_match = False
+
+raw = with_silence_tail()
+processed = inst._postprocess(raw)
+before, rate = parse(raw)
+after, rate_after = parse(processed)
+checker.equal("采样率不变", rate_after, rate)
+checker.check("尾静音被裁掉", after.size < before.size, f"{before.size} -> {after.size}")
+tail = after[-int(rate * 0.10) :]
+tail_db = 20 * math.log10(max(float(np.sqrt(np.mean(np.square(tail)))), 1e-9))
+checker.check("尾巴补的是静音而不是长拖尾", tail_db < -60, f"尾 0.1s {tail_db:.1f} dBFS")
+peak_db = 20 * math.log10(max(float(np.max(np.abs(after))), 1e-9))
+checker.check("峰值归一到 -1.5 dBFS", abs(peak_db - (-1.5)) < 0.8, f"{peak_db:.2f} dBFS")
+info_lines = [text for text in logger.messages("info") if text.startswith("语音后处理")]
+checker.equal("只打一行 info 日志", len(info_lines), 1)
+
+# 无需调整时只打 debug
+clean = make_wav(1.0, amplitude=0.85)
+inst2, _, logger2 = make_plugin(module)
+inst2.config.delivery.trim_tail_silence_ms = 0
+inst2.config.delivery.tail_pad_ms = 0
+inst2.config.delivery.peak_normalize = False
+inst2.config.delivery.timbre_match = False
+inst2._postprocess(clean)
+checker.equal("无改动时不打 info", len([m for m in logger2.messages("info") if m.startswith("语音后处理")]), 0)
+
+# ---------------------------------------------------------------- 缓存清理
+with tempfile.TemporaryDirectory() as tmp:
+    cache_root = Path(tmp)
+    cache = cache_root / "reference-cache"
+    cache.mkdir()
+    for index in range(9):
+        target = cache / f"reference-{index}.wav"
+        target.write_bytes(make_wav(0.2))
+        os.utime(target, (1_700_000_000 + index, 1_700_000_000 + index))
+    inst3, _, _ = make_plugin(module)
+    inst3.ctx.paths.runtime_dir = cache_root
+    inst3._prune_reference_cache(keep=6)
+    kept = sorted(item.name for item in cache.iterdir())
+    checker.equal("缓存只留最近 6 个", kept, [f"reference-{i}.wav" for i in range(3, 9)])
+
+sys.exit(checker.report())
