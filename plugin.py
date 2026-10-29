@@ -29,7 +29,7 @@ import subprocess
 import time
 import wave
 from pathlib import Path
-from typing import Any, Dict, List, Literal, Optional, Tuple
+from typing import Any, Dict, List, Literal, Optional, Tuple, cast
 from urllib.parse import urlsplit
 
 import aiohttp
@@ -47,10 +47,11 @@ def _numpy() -> Any:
     if not _NUMPY_TRIED:
         _NUMPY_TRIED = True
         try:
-            import numpy as np
+            import numpy
+
+            _NUMPY_MODULE = numpy
         except ImportError:  # pragma: no cover - 正常安装都有 numpy
-            np = None
-        _NUMPY_MODULE = np
+            _NUMPY_MODULE = None
     return _NUMPY_MODULE
 
 SUPPORTED_REFERENCE_SUFFIXES = {".aac", ".flac", ".m4a", ".mp3", ".mpeg", ".ogg", ".opus", ".wav", ".wma"}
@@ -545,6 +546,14 @@ class MiMoVoicePlugin(MaiBotPlugin):
     """把纯文本回复替换为 MiMo 语音条。"""
 
     config_model = MiMoVoiceConfig
+
+    @property
+    def config(self) -> "MiMoVoiceConfig":
+        """宿主注入的配置实例。这里收窄类型，让静态检查能看懂各分节字段。"""
+        instance = self._plugin_config_instance
+        if instance is None:
+            raise RuntimeError("插件配置尚未完成注入")
+        return cast("MiMoVoiceConfig", instance)
 
     def __init__(self) -> None:
         super().__init__()

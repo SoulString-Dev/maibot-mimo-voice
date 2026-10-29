@@ -67,6 +67,7 @@ git tag -a vX.Y.Z -m "vX.Y.Z" && git push origin vX.Y.Z   # 版本号必须与 _
 - `PluginConfigBase` 是 `extra="ignore"`：删配置键不会让旧 `config.toml` 报错，宿主会按新 schema 重写。
 - TOML 不能重复声明同一张表，分组只能用注释。
 - hook 可用键：`send_service.before_send`（可改 message / abort）、`send_service.after_send`（`message_id` 已是平台回执）、`maisaka.planner.before_request`（只有 `items`/`tool_definitions`/`session_id`，不能 abort）。
+- **静态检查要装在带 SDK 的环境里跑**：没有 `maibot-plugin-sdk` 时基类会被当成 `Any`，`self.config.xxx` 的字段错误一个都发现不了（CI 第一次跑就因此红过一次）。本地先 `pip install --user "maibot-plugin-sdk>=2.12"` 再跑 `mypy plugin.py`。
 - 出站消息里 `user_info.user_id` 是**机器人自己**；要拿对方 QQ 得在 `chat.receive.before_process` 记 `session_id → 用户`。
 
 ## 5. 部署与验证

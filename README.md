@@ -275,7 +275,7 @@ python -c "import tomllib; tomllib.load(open('config.example.toml','rb'))"
 # 静态检查 + 类型检查 + 单测（依赖见 requirements-dev.txt）
 pip install -r requirements-dev.txt
 ruff check .
-mypy plugin.py
+mypy plugin.py   # 需先装 maibot-plugin-sdk，否则基类被当作 Any，会漏掉 self.config 的类型问题
 python tests/run_all.py     # 文本/音频/配置三组共 74 条断言
 ```
 
