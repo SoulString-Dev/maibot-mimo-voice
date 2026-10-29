@@ -257,56 +257,13 @@ private_mode = "all"
 
 ### 0.5.0
 
-- `mimo.api_base_url` 增加校验：只接受 https 公网地址；指向本机、内网、链路本地或云元数据时自动回退官方地址并在启动日志告警。自建代理可显式打开 `mimo.allow_private_base_url`。
-- 新增合成结果校验：时长下限 0.3 秒、上限按字数自适应（20 秒起、最多 90 秒），RMS > −40 dBFS，WAV 头可解析；静音、截断、超长一律按失败处理并回退文字。
-- 内部一致性整理：默认朗读文案与线上配置统一；缓存上限常量按用途分开命名；三处 ffmpeg 调用收敛到两个辅助函数；临时文件按参考音频签名分目录；后处理没实际改动时不打 info 日志。
-- 新增尾部处理三件套：`delivery.trim_tail_silence_ms`（默认 250，裁掉多余尾静音）、`delivery.tail_pad_ms`（默认 120，补一点尾巴防播放端吃字）、`delivery.peak_normalize`（默认开，峰值统一到 −1.5 dBFS）。
-- 新增插件图标（`assets/icon.svg`），商店详情页会显示。
-- README 增加「目录结构」与 FAQ；修正隐私段的一处排版错乱。
+- 新增尾部处理三件套（裁尾静音 / 补尾巴 / 峰值归一到 −1.5 dBFS）与合成结果校验（时长、RMS、WAV 头）。
+- `mimo.api_base_url` 增加校验：只接受 https 公网地址，内网/本机自动回退并告警。
+- 后处理合并为一次解析写回（单条 8.4 → 6.9 ms），参考缓存只留 6 个并清理分片目录。
+- 修复重构遗留的崩溃点（音色对齐失败会抛 `AttributeError`）、目标曲线不随参考失效、抽签结果被复用等 10 余处问题。
+- 新增图标、单测（79 条断言）、ruff/mypy + CI、维护手记 `docs/MAINTAINING.md`。
 
-### 0.4.0
-
-- 新增 `delivery.timbre_match`（**默认开启**）：按参考音频的相对频谱补偿每条输出的 EQ。
-  实测同一句话多次合成时，与参考的频谱距离可从 4–6.5 dB 降到 1.6–2.2 dB，听感更贴参考；
-  男声/亮音色收益最大，带混响的参考收益最小。
-- 开启后会向 MiMo 请求 WAV，并用 numpy 做 STFT 补偿（参考音频需为 16-bit WAV）；
-  没有 numpy 或参考不是 WAV 时自动按关闭处理并打一条警告。
-- 补偿量固定限制在 ±6 dB，强度可用 `timbre_match_strength` 调；不做任何响度提升。
-- 自定义参考音频改放**插件数据目录**的 `references/`（插件会自动创建，启动日志打印路径），
-  与插件代码分开，升级不再覆盖；为兼容旧版本，放在插件根目录也仍然能读到。
-- 配置模板改成逐节中文说明（每节先说"这一节管什么"，每个字段写清取值/默认/建议）。
-- 修正 manifest 的 `sdk.max_version`（`2.99.99` → `2.12.99`）：旧值被插件索引的版本校验拒绝，
-  导致 0.3.1 一直进不了商店。
-
-### 0.3.1
-
-- 新增 `mimo.retry_on_timeout`（默认 `true`）：单次合成超过 `general.timeout` 后换一次请求重来，**最多只重试一次**。
-- 依据：线上 27 次实测中，超时的请求大多直接跳到 30 秒以上（30.6 / 31.6 / 35.6 / 63.3 / 163.3 秒），把超时放宽到 30 秒几乎救不回来；而"再给一次机会"按两条独立估能把失败率从约 17% 压到 3–4%，正常时段体感不变。
-- 代价：最坏情况下要等两个超时周期（默认 40 秒）才回退文字。
-- 默认 `trigger.probability` 从 `0.05` 提到 `0.15`：0.05 下语音出现得太少，实际体感接近"不会说话"。
-- 文档：新增「关于 ffmpeg（可选依赖）」一节，说明 `subprocess` 只出现在可选的参考音频处理策略里，参数固定、不经 shell、不联网。
-
-### 0.3.0
-
-- 新增内置音色 `voice.preset = bingtang | jasmine | custom`，自带冰糖 / 茉莉两套标准参考音频，开箱即用。
-- 配置项从 40 个精简到 30 个：删掉 `top_p`、`sample_rate`、`voice_dir`、`ffmpeg_path`、`max_clip_duration`、`balanced_clip_duration`、`silence_threshold_db`、`reference_bitrate_kbps`、`max_reference_base64_mb`；三个判定有效期合并为 `trigger.decision_ttl`。
-- 配置模板重排为「基础 / 进阶」两段，给所有枚举项标注了下拉候选，`plugin.config_version` 同步 0.3.0；旧 `config.toml` 的残留键会被自动忽略。
-- 新增 `trigger.english_policy`（`keep` / `strip_tics` / `strip`）：默认只删 `ww`、`emmm`、`ohhhhhhh` 这类复读口癖，`LLM`、`token`、`cos` 等真词原样朗读。
-- 新增 `trigger.random_requires_chinese`（默认开）：随机抽中的那次如果清洗后仍含英文，就直接发文字；模型主动请求、`llm_trigger`、`voice_only` 不受影响。
-
-### 0.2.2
-
-- 修复 `tools/build_reference.sh` 在 ffmpeg 7.1 及以上版本直接失败的问题：淡出改用「反转 → 20ms 淡入 → 再反转」，不再依赖 `afade` 的负数 `st`。
-
-### 0.2.1
-
-- 新增 `trigger.mode = "random_llm"` 与 `mimo_voice_say` 工具：随机抽签 + 模型主动请求双触发。
-- 合成前清洗文本（表情、引号、波浪号、省略号、重复标点），并补 `style_instruction` 压住音高漂移。
-- 硬化：空音频 / 过短音频判定、超时不再重试、可重试错误指数退避、建连超时独立、并发满直接发文字不排队、参考音频路径限制在插件目录内、工具加 `visibility`。
-
-### 0.2.0
-
-- 首个发布版本。
+完整历史见 [CHANGELOG.md](CHANGELOG.md)。
 
 ## 开发
 

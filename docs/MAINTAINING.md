@@ -16,6 +16,8 @@
 
 ## 2. 发版流程
 
+**`CHANGELOG.md` 是版本变更的唯一事实源**：先改 CHANGELOG，再把对应段落拷进 Release 说明；README 只保留最新一版的要点。
+
 ```bash
 git add -A && git commit -m "feat: ..." && git push origin main
 git tag -a vX.Y.Z -m "vX.Y.Z" && git push origin vX.Y.Z   # 版本号必须与 _manifest.json 完全一致
