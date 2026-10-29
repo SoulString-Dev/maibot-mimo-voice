@@ -29,15 +29,13 @@ import subprocess
 import time
 import wave
 from pathlib import Path
-from urllib.parse import urlsplit
 from typing import Any, Dict, List, Literal, Optional, Tuple
+from urllib.parse import urlsplit
 
 import aiohttp
-
-from pydantic import model_validator
-
 from maibot_sdk import CONFIG_RELOAD_SCOPE_SELF, Field, HookHandler, MaiBotPlugin, PluginConfigBase, Tool
 from maibot_sdk.types import ErrorPolicy, HookMode, HookOrder
+from pydantic import model_validator
 
 _NUMPY_MODULE: Any = None
 _NUMPY_TRIED = False
@@ -603,7 +601,7 @@ class MiMoVoicePlugin(MaiBotPlugin):
         """
         shown: set[str] = set()
         buckets = 0
-        for warning in list(_CONFIG_WARNINGS):
+        for warning in _CONFIG_WARNINGS:
             key = warning.split(":", 1)[0]
             if key in shown:
                 continue
@@ -840,7 +838,7 @@ class MiMoVoicePlugin(MaiBotPlugin):
             return False
         command = [ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-f", "concat", "-safe", "0",
                    "-i", str(listing), "-ac", "1", "-ar", str(int(_REFERENCE_SAMPLE_RATE))]
-        command += list(codec_args) + [str(output)]
+        command = [*command, *codec_args, str(output)]
         return self._run_ffmpeg(command, what)
 
     def _build_reference_with_ffmpeg(self, files: List[Path]) -> Optional[bytes]:
@@ -1060,7 +1058,7 @@ class MiMoVoicePlugin(MaiBotPlugin):
             return audio
         try:
             samples, rate = _read_wav_pcm(audio)
-        except Exception:  # noqa: BLE001 - mp3/坏文件都按原样发出
+        except Exception:
             return audio
         if samples.size == 0 or rate <= 0:
             return audio
@@ -1081,7 +1079,7 @@ class MiMoVoicePlugin(MaiBotPlugin):
                     distance_db = float(np.sqrt(np.mean((target_arr - curve) ** 2)))
                     samples = _apply_gain_curve(samples, rate, gains)
                     changed = True
-                except Exception as exc:  # noqa: BLE001
+                except Exception as exc:
                     self._warn_timbre_once("音色对齐失败（%s），本条按原样处理", exc)
         try:
             if delivery.trim_tail_silence_ms > 0:
@@ -1108,7 +1106,7 @@ class MiMoVoicePlugin(MaiBotPlugin):
                     samples = np.concatenate([samples, np.zeros(pad_frames, dtype=np.float32)])
                     changed = True
             result = _write_wav_pcm(samples, rate)
-        except Exception as exc:  # noqa: BLE001 - 后处理失败不该毁掉这条语音
+        except Exception as exc:
             self._warn_once("post:tail", "尾音处理失败（%s），本条按原样发出", exc)
             return audio
         if not changed and distance_db is None:
@@ -1162,7 +1160,7 @@ class MiMoVoicePlugin(MaiBotPlugin):
             return None
         try:
             pcm, rate = _read_wav_pcm(path.read_bytes())
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             self._warn_once("timbre:read", "音色对齐读取参考音频失败（%s），按关闭处理", exc)
             return None
         self._timbre_target_cache = _spectral_curve(pcm, rate).tolist()
@@ -1210,7 +1208,7 @@ class MiMoVoicePlugin(MaiBotPlugin):
                 last_error = exc
                 if attempt < attempts:
                     retryable = exc
-            except Exception as exc:  # noqa: BLE001 - 交给上层统一降级
+            except Exception as exc:
                 raise RuntimeError(f"语音合成失败: {exc}") from exc
             finally:
                 # 先释放槽位再退避，否则退避期间别的聊天流会一直被判"忙"
@@ -1268,9 +1266,13 @@ class MiMoVoicePlugin(MaiBotPlugin):
             return False
         if len(set(low)) == 1 and low[0] in _CONSONANTS:
             return True
-        if low[0] in _VOWELS and len(low) >= 4 and len(set(low[1:])) == 1 and low[1] in _CONSONANTS:
-            return True
-        return False
+        # 一个元音 + 同一辅音重复三次以上（emmm / ohhhhhhh）
+        return (
+            low[0] in _VOWELS
+            and len(low) >= 4
+            and len(set(low[1:])) == 1
+            and low[1] in _CONSONANTS
+        )
 
     @staticmethod
     def _touches_digit(text: str, match: Any) -> bool:
@@ -1367,9 +1369,12 @@ class MiMoVoicePlugin(MaiBotPlugin):
         payload = message if isinstance(message, dict) else {}
         session_id = str(payload.get("session_id") or "").strip()
         scope = str(payload.get("scope") or "").strip()
-        info = payload.get("message_info") if isinstance(payload.get("message_info"), dict) else {}
-        group_info = info.get("group_info") if isinstance(info.get("group_info"), dict) else {}
-        user_info = info.get("user_info") if isinstance(info.get("user_info"), dict) else {}
+        info = payload.get("message_info")
+        info = info if isinstance(info, dict) else {}
+        group_info = info.get("group_info")
+        group_info = group_info if isinstance(group_info, dict) else {}
+        user_info = info.get("user_info")
+        user_info = user_info if isinstance(user_info, dict) else {}
         self._remember_scope(scope, session_id, str(group_info.get("group_id") or ""), str(user_info.get("user_id") or ""))
 
     # ------------------------------------------------------------------- 触发
@@ -1485,8 +1490,10 @@ class MiMoVoicePlugin(MaiBotPlugin):
             return None
 
         scope = str(outbound.get("scope") or "").strip()
-        info = outbound.get("message_info") if isinstance(outbound.get("message_info"), dict) else {}
-        group_info = info.get("group_info") if isinstance(info.get("group_info"), dict) else {}
+        info = outbound.get("message_info")
+        info = info if isinstance(info, dict) else {}
+        group_info = info.get("group_info")
+        group_info = group_info if isinstance(group_info, dict) else {}
         group_id = str(group_info.get("group_id") or "").strip()
         cached = self._lookup_scope(stream_id)
         user_id = cached.get("user_id", "")
@@ -1502,7 +1509,7 @@ class MiMoVoicePlugin(MaiBotPlugin):
 
         try:
             audio = await self._synthesize_guarded(prepared)
-        except Exception as exc:  # noqa: BLE001 - 统一降级
+        except Exception as exc:
             self.ctx.logger.warning("语音合成失败（%s），%s", exc, "回退文字" if self.config.delivery.fallback_to_text else "拦截消息")
             return None if self.config.delivery.fallback_to_text else {"action": "abort"}
 
@@ -1546,7 +1553,7 @@ class MiMoVoicePlugin(MaiBotPlugin):
         order=HookOrder.LATE,
         error_policy=ErrorPolicy.SKIP,
     )
-    async def configure_planner_tools(self, **kwargs: Any) -> Dict[str, Any]:
+    async def configure_planner_tools(self, **kwargs: Any) -> Optional[Dict[str, Any]]:
         tool_definitions = kwargs.get("tool_definitions")
         if not isinstance(tool_definitions, list):
             return None

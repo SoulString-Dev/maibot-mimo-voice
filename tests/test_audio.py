@@ -5,12 +5,11 @@ import math
 import os
 import sys
 import tempfile
-import wave
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from __bootstrap import Checker, load_plugin, make_plugin  # noqa: E402
+from __bootstrap import Checker, load_plugin, make_plugin
 
 module = load_plugin()
 checker = Checker("音频侧")

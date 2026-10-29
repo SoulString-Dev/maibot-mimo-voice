@@ -312,7 +312,16 @@ private_mode = "all"
 # 语法与配置校验
 python -m py_compile plugin.py
 python -c "import tomllib; tomllib.load(open('config.example.toml','rb'))"
+
+# 静态检查 + 类型检查 + 单测（依赖见 requirements-dev.txt）
+pip install -r requirements-dev.txt
+ruff check .
+mypy plugin.py
+python tests/run_all.py     # 文本/音频/配置三组共 74 条断言
 ```
+
+CI（`.github/workflows/ci.yml`）在每次 push / PR 上跑同样三条命令：ruff、mypy、单测。
+测试不依赖 pytest，只用标准库，容器里 `/MaiMBot/.venv/bin/python tests/run_all.py` 也能直接跑。
 
 部署到运行中的麦麦（示例：NAS 上的容器）：
 

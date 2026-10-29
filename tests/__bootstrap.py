@@ -12,7 +12,7 @@ import logging
 import sys
 from pathlib import Path
 from types import ModuleType
-from typing import Any, Dict, List
+from typing import Any, List
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PLUGIN_FILE = REPO_ROOT / "plugin.py"

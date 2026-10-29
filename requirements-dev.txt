@@ -1,0 +1,8 @@
+# 开发/CI 依赖（运行插件本身不需要这些）
+ruff>=0.6
+mypy>=1.10
+# 测试需要的最小运行依赖
+aiohttp>=3.8
+pydantic>=2
+numpy>=1.24
+maibot-plugin-sdk>=2.12
