@@ -38,7 +38,7 @@ api_base_url = "https://api.xiaomimimo.com/v1"
 #   mimo-v2.5-tts-voicedesign  文字设计音色：用一段描述生成音色，适合没有参考音频时试用
 model = "mimo-v2.5-tts-voiceclone"
 # 音频格式（下拉）：mp3 = 体积小、发送快（推荐）；wav = 无损，体积约 8 倍。
-# 开了 [delivery] timbre_match 后会自动改用 wav，此项不影响结果。
+# 开了 [delivery] 里任一音频后处理（音色对齐 / 尾音裁剪 / 补尾音 / 峰值归一）会自动改用 wav。
 audio_format = "mp3"
 # 采样温度（滑块 0–1）：越低越稳定，但可能发闷、平；越高越有起伏，但偶尔像换了个人。
 # 实测 0.15 时同一句话 5 次的音高差只有约 2 Hz；0.6 以上开始明显漂移。

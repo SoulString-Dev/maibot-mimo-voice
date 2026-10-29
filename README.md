@@ -137,7 +137,7 @@ private_mode = "all"
 | `plugin.config_version` | `0.5.0` | 配置版本号（内部使用，无需修改） |
 | `mimo.api_base_url` | `https://api.xiaomimimo.com/v1` | 必须是 https 公网地址；写成内网/本机地址会自动回退官方地址并告警 |
 | `mimo.model` | `mimo-v2.5-tts-voiceclone` | 也可用 `mimo-v2.5-tts`（预置音色） |
-| `mimo.audio_format` | `mp3` | `mp3` / `wav` |
+| `mimo.audio_format` | `mp3` | `mp3` / `wav`；开了任一音频后处理（音色对齐 / 尾音裁剪 / 补尾音 / 峰值归一）时自动改用 `wav`，此项实际被忽略 |
 | `mimo.max_concurrent` | `1` | 同时合成路数，建议保持 1 |
 | `mimo.retry_attempts` | `0` | 仅对 429 / 5xx / 网络错误重试 |
 | `mimo.retry_on_timeout` | `true` | 单次合成超时后换一次请求重来（只重试一次） |

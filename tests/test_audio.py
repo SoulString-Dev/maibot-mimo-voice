@@ -111,4 +111,63 @@ with tempfile.TemporaryDirectory() as tmp:
     kept = sorted(item.name for item in cache.iterdir())
     checker.equal("缓存只留最近 6 个", kept, [f"reference-{i}.wav" for i in range(3, 9)])
 
+
+# ---------------------------------------------------------------- 音色对齐失败要降级
+# P0 回归：曾经在这里调用已删除的 _warn_timbre_once，异常分支直接 AttributeError
+inst4, _, logger4 = make_plugin(module)
+inst4.config.delivery.timbre_match = True
+inst4.config.delivery.trim_tail_silence_ms = 0
+inst4.config.delivery.tail_pad_ms = 0
+inst4.config.delivery.peak_normalize = False
+inst4._timbre_target = lambda: [0.0] * 30  # type: ignore[method-assign]
+_original_gain = module._apply_gain_curve
+
+
+def _boom(*_args, **_kwargs):
+    raise RuntimeError("模拟频谱处理失败")
+
+
+module._apply_gain_curve = _boom
+try:
+    survived = inst4._postprocess(make_wav(1.0))
+finally:
+    module._apply_gain_curve = _original_gain
+checker.check("对齐失败时不抛异常", isinstance(survived, bytes) and len(survived) > 0)
+warnings4 = [text for text in logger4.messages("warning") if "音色对齐失败" in text]
+checker.equal("对齐失败留一条告警", len(warnings4), 1)
+
+# ---------------------------------------------------------------- 参考音频换了要重算目标曲线
+with tempfile.TemporaryDirectory() as tmp:
+    root = Path(tmp)
+    ref = root / "probe.wav"
+    ref.write_bytes(make_wav(0.8, freq=220.0))
+    inst5, _, _ = make_plugin(module)
+    inst5.ctx.paths.data_dir = root
+    inst5.config.voice.preset = "custom"
+    inst5.config.voice.reference_path = "probe.wav"
+    first = inst5._timbre_target()
+    ref.write_bytes(make_wav(0.8, freq=880.0))
+    os.utime(ref, (1_700_000_500, 1_700_000_500))
+    second = inst5._timbre_target()
+    checker.check("参考音频变化后目标曲线重算", first is not None and second is not None and first != second)
+
+# ---------------------------------------------------------------- 缓存清理带上分片目录
+with tempfile.TemporaryDirectory() as tmp2:
+    root2 = Path(tmp2)
+    cache2 = root2 / "reference-cache"
+    cache2.mkdir()
+    for index in range(8):
+        item = cache2 / f"reference-{index}.wav"
+        item.write_bytes(make_wav(0.2))
+        os.utime(item, (1_700_000_000 + index, 1_700_000_000 + index))
+    (cache2 / "parts-abc").mkdir()
+    (cache2 / "parts-abc" / "part-0.wav").write_bytes(b"x")
+    (cache2 / "merge-abc.txt").write_text("file 'x'\n", encoding="utf-8")
+    inst6, _, _ = make_plugin(module)
+    inst6.ctx.paths.runtime_dir = root2
+    inst6._prune_reference_cache(keep=6)
+    names = sorted(item.name for item in cache2.iterdir())
+    checker.check("分片目录被清理", "parts-abc" not in names, str(names))
+    checker.check("合并列表被清理", "merge-abc.txt" not in names, str(names))
+
 sys.exit(checker.report())

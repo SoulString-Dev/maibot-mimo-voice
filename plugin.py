@@ -541,6 +541,8 @@ class MiMoVoicePlugin(MaiBotPlugin):
         self._reference_stamp: str = ""
         self._reference_signature: Optional[str] = None
         self._timbre_target_cache: Optional[List[float]] = None
+        self._timbre_target_stamp: str = ""
+        self._reference_built_suffix: Optional[str] = None
         self._warned: set[str] = set()
         self._synthesis_slots = asyncio.Semaphore(1)
 
@@ -630,6 +632,8 @@ class MiMoVoicePlugin(MaiBotPlugin):
         self._reference_stamp = ""
         self._reference_signature = None
         self._timbre_target_cache = None
+        self._timbre_target_stamp = ""
+        self._reference_built_suffix = None
         self._warned.clear()
         self._synthesis_slots = asyncio.Semaphore(max(1, int(self.config.mimo.max_concurrent)))
         self.ctx.logger.info("MiMo 语音插件配置已热更新")
@@ -793,6 +797,24 @@ class MiMoVoicePlugin(MaiBotPlugin):
                 removed += 1
             except OSError:
                 continue
+        # balanced 的分片目录、full_merge 的列表文件不在顶层，一并收掉
+        keep_dirs = {path.parent.name for path in files[:keep]}
+        try:
+            extras = list(directory.iterdir())
+        except OSError:
+            extras = []
+        for extra in extras:
+            if extra.name in keep_dirs:
+                continue
+            try:
+                if extra.is_dir() and extra.name.startswith("parts-"):
+                    shutil.rmtree(extra)
+                    removed += 1
+                elif extra.is_file() and extra.name.startswith("merge-"):
+                    extra.unlink()
+                    removed += 1
+            except OSError:
+                continue
         if removed:
             self.ctx.logger.info("参考音频缓存已清理 %d 个旧文件", removed)
 
@@ -899,6 +921,7 @@ class MiMoVoicePlugin(MaiBotPlugin):
         if not files:
             return None
         if self.config.voice.reference_strategy == "single_file":
+            self._reference_built_suffix = files[0].suffix.lower() or ".wav"
             return files[0].read_bytes()
         signature = self._build_reference_signature(files)
         if signature != self._reference_signature:
@@ -906,7 +929,12 @@ class MiMoVoicePlugin(MaiBotPlugin):
             self._reference_uri = None
         prepared = self._build_reference_with_ffmpeg(files)
         if prepared is not None:
+            # full_merge 走 libmp3lame，实际字节是 mp3，data URI 的 mime 要跟着变
+            self._reference_built_suffix = (
+                ".mp3" if self.config.voice.reference_strategy == "full_merge" else ".wav"
+            )
             return prepared
+        self._reference_built_suffix = files[0].suffix.lower() or ".wav"
         return files[0].read_bytes()
 
     def _reference_stamp_value(self) -> str:
@@ -929,7 +957,8 @@ class MiMoVoicePlugin(MaiBotPlugin):
         limit = _REFERENCE_MAX_BYTES
         if len(payload) > limit:
             raise ValueError(f"参考音频过大（{len(payload) / 1024 / 1024:.1f}MB），超过 9.5MB 限制")
-        suffix = self._reference_path().suffix.lower().lstrip(".") or "wav"
+        built = (self._reference_built_suffix or "").lstrip(".").lower()
+        suffix = built or self._reference_path().suffix.lower().lstrip(".") or "wav"
         mime = f"audio/{suffix}" if suffix not in {"mpeg", "m4a"} else "audio/mpeg"
         encoded = base64.b64encode(payload).decode("ascii")
         self._reference_uri = f"data:{mime};base64,{encoded}"
@@ -1042,7 +1071,6 @@ class MiMoVoicePlugin(MaiBotPlugin):
             raise _RetryableSynthesisError(f"MiMo TTS 返回的音频几乎无声（{dbfs:.1f} dBFS）")
         return audio
 
-    # [b-batch]
     def _postprocess(self, audio: bytes) -> bytes:
         """音色对齐 + 尾音裁剪 + 峰值归一 + 尾部补静音，一次读完、一次写回。
 
@@ -1080,7 +1108,7 @@ class MiMoVoicePlugin(MaiBotPlugin):
                     samples = _apply_gain_curve(samples, rate, gains)
                     changed = True
                 except Exception as exc:
-                    self._warn_timbre_once("音色对齐失败（%s），本条按原样处理", exc)
+                    self._warn_once("timbre:apply", "音色对齐失败（%s），本条按原样处理", exc)
         try:
             if delivery.trim_tail_silence_ms > 0:
                 threshold = 10 ** (_SILENCE_DBFS / 20.0)
@@ -1149,7 +1177,8 @@ class MiMoVoicePlugin(MaiBotPlugin):
         return self.config.mimo.audio_format
 
     def _timbre_target(self) -> Optional[List[float]]:
-        if self._timbre_target_cache is not None:
+        stamp = self._reference_stamp_value()
+        if self._timbre_target_cache is not None and stamp == self._timbre_target_stamp:
             return self._timbre_target_cache
         path = self._reference_path()
         if path.suffix.lower() != ".wav":
@@ -1164,6 +1193,7 @@ class MiMoVoicePlugin(MaiBotPlugin):
             self._warn_once("timbre:read", "音色对齐读取参考音频失败（%s），按关闭处理", exc)
             return None
         self._timbre_target_cache = _spectral_curve(pcm, rate).tolist()
+        self._timbre_target_stamp = stamp
         return self._timbre_target_cache
 
     def _warn_once(self, key: str, message: str, *args: Any) -> None:
@@ -1513,8 +1543,12 @@ class MiMoVoicePlugin(MaiBotPlugin):
             self.ctx.logger.warning("语音合成失败（%s），%s", exc, "回退文字" if self.config.delivery.fallback_to_text else "拦截消息")
             return None if self.config.delivery.fallback_to_text else {"action": "abort"}
 
-        # 音色对齐、尾音裁剪、峰值归一合并成一次线程调用（见 _postprocess）
-        audio = await asyncio.to_thread(self._postprocess, audio)
+        # 音色对齐、尾音裁剪、峰值归一合并成一次线程调用（见 _postprocess）。
+        # 后处理只是增强：任何异常都退回原始音频，不能把整条语音拖垮。
+        try:
+            audio = await asyncio.to_thread(self._postprocess, audio)
+        except Exception as exc:  # pragma: no cover - 兜底，正常不该触发
+            self._warn_once("post:failed", "语音后处理失败（%s），本条按原样发出", exc)
 
         outbound["raw_message"] = [
             {
