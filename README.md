@@ -35,6 +35,8 @@
    想换成自己的声音时，把参考音频放进插件目录并把 `voice.preset` 改成 `custom`。
 4. 生效方式：重启核心，或者直接改插件目录里的文件——麦麦的文件监视会自动重载扩展插件。
 
+维护与发版细节见 [`docs/MAINTAINING.md`](docs/MAINTAINING.md)。
+
 依赖：`aiohttp`（麦麦插件运行时已自带）。只有用 `best_single` / `balanced` / `full_merge` 参考策略时才需要宿主机上的 `ffmpeg`。
 
 ## 内置音色
