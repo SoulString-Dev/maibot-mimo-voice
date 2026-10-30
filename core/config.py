@@ -32,7 +32,7 @@ class PluginSectionConfig(PluginConfigBase):
     __ui_label__ = "基础设置"
 
     enabled: bool = Field(default=True, description="是否启用语音回复")
-    config_version: str = Field(default="0.5.1", description="配置文件版本号（内部使用，无需修改）")
+    config_version: str = Field(default="0.5.2", description="配置文件版本号（内部使用，无需修改）")
 
 
 class GeneralConfig(PluginConfigBase):
@@ -142,6 +142,11 @@ class VoiceConfig(PluginConfigBase):
         default="single_file",
         description="single_file=直接用一个文件（不需要 ffmpeg）；其余三种需要插件目录下有 ffmpeg，从 voices/ 自动截取或拼接参考音频",
     )
+    auto_prepare_reference: bool = Field(
+        default=True,
+        description="single_file 且参考是 WAV 时，发送前自动切成单句、去掉长静音、拼到约 3.7 秒（3–5 秒区间）并峰值归一到 -3 dBFS，"
+        "结果缓存在运行时目录；已经是短而干净的素材则原样使用。实测长参考（8 秒、多段、静音 18%）更容易出现音色漂移和刺耳，建议保持开启",
+    )
     style_instruction: str = Field(
         default=DEFAULT_STYLE_INSTRUCTION,
         description="随请求发送的朗读风格指令。它决定语速和语气，改动后听感变化很大；留空表示不发送",
@@ -213,13 +218,14 @@ class DeliveryConfig(PluginConfigBase):
         default=1.0,
         ge=0.0,
         le=1.0,
-        description="音色对齐强度，0=不处理、1=完全对齐；补偿量始终限制在 ±6 dB 以内",
+        description="音色对齐强度，0=不处理、1=完全对齐；补偿量始终限制在 ±6 dB 以内，"
+        "且频谱距离超过 8 dB 后会自动按比例减弱（距离远说明这条本来就偏离参考，硬对齐只会更闷）",
     )
     trim_tail_silence_ms: int = Field(
         default=250,
         ge=0,
         le=3000,
-        description="尾部静音超过这个毫秒数就裁掉（只留 50ms），0=不裁；实测合成尾部静音 94–474ms 不稳定",
+        description="尾部静音超过这个毫秒数就裁掉（只留 150ms），0=不裁；实测合成尾部静音 94–474ms 不稳定",
     )
     tail_pad_ms: int = Field(
         default=120,

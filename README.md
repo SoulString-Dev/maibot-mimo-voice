@@ -130,13 +130,13 @@ private_mode = "all"
 | `delivery.fallback_to_text` | `true` | 合成失败 / 超时时发文字还是拦截 |
 | `delivery.skip_when_busy` | `true` | 并发路数占满时直接发文字，不排队 |
 | `delivery.timbre_match` | `true` | 音色对齐：按参考音频的频谱补偿每条输出（需要 WAV 参考，默认开） |
-| `delivery.timbre_match_strength` | `1.0` | 音色对齐强度 0–1，补偿量始终限制在 ±6 dB |
+| `delivery.timbre_match_strength` | `1.0` | 音色对齐强度 0–1，补偿量始终限制在 ±6 dB；与参考差距 >8 dB 时自动按比例减弱 |
 
 ### 进阶
 
 | 配置 | 默认 | 说明 |
 |---|---|---|
-| `plugin.config_version` | `0.5.1` | 配置版本号（内部使用，无需修改） |
+| `plugin.config_version` | `0.5.2` | 配置版本号（内部使用，无需修改） |
 | `mimo.api_base_url` | `https://api.xiaomimimo.com/v1` | 必须是 https 公网地址；写成内网/本机地址会自动回退官方地址并告警 |
 | `mimo.model` | `mimo-v2.5-tts-voiceclone` | 也可用 `mimo-v2.5-tts`（预置音色） |
 | `mimo.audio_format` | `mp3` | `mp3` / `wav`；开了任一音频后处理（音色对齐 / 尾音裁剪 / 补尾音 / 峰值归一）时自动改用 `wav`，此项实际被忽略 |
@@ -148,13 +148,14 @@ private_mode = "all"
 | `mimo.allow_private_base_url` | `false` | 允许把音频发往内网/本机地址（只有自建代理时才需要） |
 | `voice.reference_path` | `reference.wav` | 仅 `preset = custom` 时生效，填 `references/` 下的文件名 |
 | `voice.reference_strategy` | `single_file` | 需要 ffmpeg 的策略：`best_single` / `balanced` / `full_merge` |
+| `voice.auto_prepare_reference` | `true` | 参考 WAV 超过 5 秒或静音偏多时，自动按句拼接成 3–5 秒的干净样本并缓存（0.5.2 新增） |
 | `trigger.decision_ttl` | `10.0` | 判定有效期（秒） |
 | `trigger.overflow_policy` | `text` | 超长时：`text` 保留文字；`truncate` 截断后合成 |
 | `trigger.english_policy` | `strip_tics` | `keep` 原样念；`strip_tics` 只删复读口癖；`strip` 删所有拉丁串（会误伤真词） |
 | `trigger.random_requires_chinese` | `true` | 随机路径遇英文改发文字 |
-| `delivery.trim_tail_silence_ms` | `250` | 尾部静音超过这个毫秒数就裁掉（只留 50ms），0 = 不裁 |
+| `delivery.trim_tail_silence_ms` | `250` | 尾部静音超过这个毫秒数就裁掉（只留 150ms，0.5.2 前是 50ms），0 = 不裁 |
 | `delivery.tail_pad_ms` | `120` | 处理完后补多少毫秒尾静音，避免播放端吃掉最后一个字 |
-| `delivery.peak_normalize` | `true` | 把峰值统一拉到 −1.5 dBFS，解决有的条小声有的条刺耳 |
+| `delivery.peak_normalize` | `true` | 把峰值统一拉到 −1.5 dBFS，解决有的条小声有的条刺耳；单条最多提 +6 dB 并软限幅，避免放大破音 |
 | `filters.group_mode` | `all` | 群聊放行：`all` / `whitelist` / `blacklist` |
 | `filters.private_mode` | `all` | 私聊放行：`all` / `whitelist` / `blacklist` |
 | `filters.group_ids` | `[]` | 群号列表 |
@@ -230,7 +231,7 @@ private_mode = "all"
 
 **明明抽中了，收到的却是文字？** 合成超时（默认 20 秒）、上游 5xx、返回静音或音频异常都会回退文字，日志里有一行 `语音合成失败（...），回退文字`。
 
-**听起来不像参考音频？** 参考换成 3–10 秒、安静环境、单人、无背景音乐的干声；`delivery.timbre_match` 默认开启，能补一部分频谱差，但补不了混响和削顶失真。
+**听起来不像参考音频？** 参考换成 2–5 秒、安静环境、单人、无背景音乐的干声；`voice.auto_prepare_reference`（默认开）会把过长的参考自动切句拼到 3–5 秒并做响度归一，启动日志里对过长的参考也会给出提示。`delivery.timbre_match` 默认开启，能补一部分频谱差，但补不了混响和削顶失真。
 
 ## 已知限制
 
@@ -242,7 +243,7 @@ private_mode = "all"
 
 ## 隐私
 
-参考音频只保存在本地（插件目录，或插件数据目录下的 `references/`）；使用 ffmpeg 参考策略时，处理结果缓存在宿主提供的 runtime 目录下的 `reference-cache/`（拿不到时退回插件目录）。
+参考音频只保存在本地（插件目录，或插件数据目录下的 `references/`）；参考瘦身结果与 ffmpeg 参考策略的处理结果都缓存在宿主提供的 runtime 目录下的 `reference-cache/`（拿不到时退回插件目录）。
 
 除了随请求发给你配置的 TTS 服务（当前实现为小米 MiMo 官方 API：待合成文本与参考音频会发往 `api.xiaomimimo.com`）外，不会上传到任何地方。`mimo.api_base_url` 决定请求发往哪里，请只填写可信地址。
 
@@ -260,6 +261,13 @@ private_mode = "all"
 宿主机没有 `ffmpeg` 时，插件会在加载时退回 `single_file`，不会报错。
 
 ## 更新日志
+
+### 0.5.2
+
+- **参考音频自动瘦身**（`voice.auto_prepare_reference`，默认开）：参考 WAV 超过 5 秒或静音偏多时，纯 numpy 按句切分、拼接到 3–5 秒、峰值归一到 −3 dBFS，缓存复用；实测把 8.41 秒 / 4 段话 / 18.5% 静音的参考压到 3.80 秒 / 静音 6.8%，与人工挑选的片段平均频谱差 0.16 dB。
+- 启动体检：参考超过 6 秒、静音超过 15% 或最长静音超过 0.4 秒时打 warning，提示音色漂移风险（"2–5 秒单句"效果最好）。
+- 后处理修正：峰值归一上限从 +12 dB 收紧到 **+6 dB** 并加软限幅（不再放大破音）；音色对齐与参考差距 >8 dB 时自动减强度、相邻频带平滑（减少发闷）；尾部保留 50 ms → **150 ms**。
+- 不做"同一句合成两条挑一条"：实测 8 个客观指标与人工盲听标注重叠，自动挑等于抛硬币，反而翻倍成本与 429 概率。
 
 ### 0.5.1
 

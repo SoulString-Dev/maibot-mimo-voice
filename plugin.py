@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import copy
 import hashlib
 import io
@@ -43,6 +44,10 @@ from .core.audio import (
     _spectral_curve,
     _stderr_excerpt,
     _write_wav_pcm,
+    analyze_reference,
+    prepare_reference,
+    smooth_gain_bands,
+    soft_limit,
 )
 from .core.config import MiMoVoiceConfig
 from .core.constants import (
@@ -61,13 +66,23 @@ from .core.constants import (
     _REFERENCE_BITRATE_KBPS,
     _REFERENCE_MAX_BYTES,
     _REFERENCE_MAX_CLIP_SECONDS,
+    _REFERENCE_PREPARE_GAP_SECONDS,
+    _REFERENCE_PREPARE_MAX_SECONDS,
+    _REFERENCE_PREPARE_MIN_SEGMENT_SECONDS,
+    _REFERENCE_PREPARE_PEAK_DBFS,
+    _REFERENCE_PREPARE_TARGET_SECONDS,
     _REFERENCE_SAMPLE_RATE,
     _REFERENCE_SILENCE_DB,
+    _REFERENCE_WARN_LONGEST_SILENCE_SECONDS,
+    _REFERENCE_WARN_SECONDS,
+    _REFERENCE_WARN_SILENCE_RATIO,
     _RETRYABLE_STATUS,
     _SCOPE_CACHE_MAX_ENTRIES,
     _SCOPE_TTL_SECONDS,
     _SILENCE_DBFS,
+    _SOFT_LIMIT_CEILING,
     _TAIL_KEEP_SECONDS,
+    _TIMBRE_FULL_STRENGTH_DB,
     _TIMBRE_MAX_GAIN_DB,
     _TTL_CACHE_MAX_ENTRIES,
     PRESET_REFERENCE_FILES,
@@ -153,6 +168,10 @@ class MiMoVoicePlugin(MaiBotPlugin):
         if data_dir is not None:
             self.ctx.logger.info("参考音频目录：%s（自定义音色把文件放这里）", data_dir / "references")
         self._prune_reference_cache()
+        try:
+            self._report_reference_health()
+        except Exception as exc:  # 体检失败不影响加载
+            self.ctx.logger.debug("参考音频体检跳过：%s", exc)
         self._flush_config_warnings()
         base_host = urlsplit(self.config.mimo.api_base_url).hostname or ""
         if base_host and not base_host.endswith("xiaomimimo.com"):
@@ -478,12 +497,112 @@ class MiMoVoicePlugin(MaiBotPlugin):
             return output.read_bytes()
         return None
 
+    def _report_reference_health(self) -> None:
+        """启动体检：参考音频过长/静音过多是"偶尔换人、句子刺耳"的高危因素，只告警不阻断。"""
+        path = self._reference_path()
+        if not path.is_file():
+            self.ctx.logger.warning("参考音频不存在：%s（语音会合成失败并回退文字）", path)
+            return
+        if path.suffix.lower() != ".wav" or _numpy() is None:
+            self.ctx.logger.info("参考音频：%s（非 WAV 或缺少 numpy，未做体检）", path.name)
+            return
+        try:
+            pcm, rate = _read_wav_pcm(path.read_bytes())
+        except Exception as exc:
+            self.ctx.logger.warning("参考音频无法解析：%s（%s）", path.name, exc)
+            return
+        health = analyze_reference(pcm, rate)
+        problems = []
+        if health["duration"] > _REFERENCE_WARN_SECONDS:
+            problems.append(f"时长 {health['duration']:.1f}s（建议 2–5s）")
+        if health["silence_ratio"] > _REFERENCE_WARN_SILENCE_RATIO:
+            problems.append(f"静音占 {health['silence_ratio'] * 100:.0f}%（建议 <15%）")
+        if health["longest_silence"] > _REFERENCE_WARN_LONGEST_SILENCE_SECONDS:
+            problems.append(f"最长静音 {health['longest_silence']:.2f}s（建议 <0.4s）")
+        if problems:
+            self.ctx.logger.warning(
+                "参考音频体检未通过（%s）：%s。实测这类素材更容易出现音色漂移和句子刺耳，"
+                "建议换成 2–5 秒的干净单句；发送前插件也会自动瘦身",
+                path.name,
+                "、".join(problems),
+            )
+        else:
+            self.ctx.logger.info(
+                "参考音频体检通过：%s，%.2fs，静音 %.0f%%",
+                path.name,
+                health["duration"],
+                health["silence_ratio"] * 100,
+            )
+
+    def _prepare_signature(self, path: Path) -> str:
+        try:
+            stat = path.stat()
+        except OSError:
+            return "missing"
+        payload = {
+            "path": str(path),
+            "mtime": stat.st_mtime_ns,
+            "size": stat.st_size,
+            "target": _REFERENCE_PREPARE_TARGET_SECONDS,
+            "max": _REFERENCE_PREPARE_MAX_SECONDS,
+            "peak": _REFERENCE_PREPARE_PEAK_DBFS,
+            "rate": _REFERENCE_SAMPLE_RATE,
+        }
+        return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()[:16]
+
+    def _prepared_reference_bytes(self, path: Path) -> Optional[bytes]:
+        """single_file 的 WAV 参考自动瘦身：切句、去长静音、拼到 3.7s、峰值 -3 dBFS。
+
+        已经是"短且干净"的素材就返回 None（用原文件，不做无谓的重编码）；
+        结果按文件指纹缓存在 runtime_dir，换文件或改参数后自动重算。
+        """
+        if not self.config.voice.auto_prepare_reference:
+            return None
+        if path.suffix.lower() != ".wav" or _numpy() is None:
+            return None
+        output = self._cache_dir() / f"prepared-{self._prepare_signature(path)}.wav"
+        if output.is_file() and output.stat().st_size > 0:
+            return output.read_bytes()
+        try:
+            pcm, rate = _read_wav_pcm(path.read_bytes())
+            health = analyze_reference(pcm, rate)
+            if health["duration"] <= _REFERENCE_PREPARE_MAX_SECONDS and health["silence_ratio"] <= 0.05:
+                return None
+            prepared, meta = prepare_reference(
+                pcm,
+                rate,
+                target_seconds=_REFERENCE_PREPARE_TARGET_SECONDS,
+                max_seconds=_REFERENCE_PREPARE_MAX_SECONDS,
+                target_peak_dbfs=_REFERENCE_PREPARE_PEAK_DBFS,
+                gap_seconds=_REFERENCE_PREPARE_GAP_SECONDS,
+                min_segment_seconds=_REFERENCE_PREPARE_MIN_SEGMENT_SECONDS,
+            )
+            payload = _write_wav_pcm(prepared, rate)
+        except Exception as exc:
+            self._warn_once("reference:prepare", "参考音频自动瘦身失败（%s），改用原文件", exc)
+            return None
+        with contextlib.suppress(OSError):
+            output.write_bytes(payload)
+        self.ctx.logger.info(
+            "参考音频已自动瘦身：%s %.2fs → %.2fs（%d 段），峰值 %.1f dBFS",
+            path.name,
+            meta["source_seconds"],
+            meta["duration"],
+            meta["segments"],
+            _REFERENCE_PREPARE_PEAK_DBFS,
+        )
+        return payload
+
     def _reference_bytes(self) -> Optional[bytes]:
         files = self._reference_source_files()
         if not files:
             return None
         if self.config.voice.reference_strategy == "single_file":
             self._reference_built_suffix = files[0].suffix.lower() or ".wav"
+            prepared = self._prepared_reference_bytes(files[0])
+            if prepared is not None:
+                self._reference_built_suffix = ".wav"
+                return prepared
             return files[0].read_bytes()
         signature = self._build_reference_signature(files)
         if signature != self._reference_signature:
@@ -661,12 +780,18 @@ class MiMoVoicePlugin(MaiBotPlugin):
                 try:
                     target_arr = np.asarray(target, dtype=np.float32)
                     curve = _spectral_curve(samples, rate)
+                    distance_db = float(np.sqrt(np.mean((target_arr - curve) ** 2)))
+                    # 距离越远说明这条本来就"不是同一个人"：继续按满强度硬怼只会把音色掰闷，
+                    # 超过 _TIMBRE_FULL_STRENGTH_DB 后按距离反比降强度。
+                    strength = float(delivery.timbre_match_strength)
+                    if distance_db > _TIMBRE_FULL_STRENGTH_DB:
+                        strength *= _TIMBRE_FULL_STRENGTH_DB / distance_db
                     gains = np.clip(
-                        (target_arr - curve) * float(delivery.timbre_match_strength),
+                        (target_arr - curve) * strength,
                         -_TIMBRE_MAX_GAIN_DB,
                         _TIMBRE_MAX_GAIN_DB,
                     )
-                    distance_db = float(np.sqrt(np.mean((target_arr - curve) ** 2)))
+                    gains = smooth_gain_bands(gains)
                     samples = _apply_gain_curve(samples, rate, gains)
                     changed = True
                 except Exception as exc:
@@ -683,6 +808,11 @@ class MiMoVoicePlugin(MaiBotPlugin):
                         samples = samples[:keep]
                         changed = True
             peak = float(np.max(np.abs(samples))) if samples.size else 0.0
+            if peak > _SOFT_LIMIT_CEILING:
+                # EQ 会把原本就削顶的条子推得更破，软限幅压回天花板内再归一。
+                samples = soft_limit(samples, _SOFT_LIMIT_CEILING)
+                peak = float(np.max(np.abs(samples))) if samples.size else 0.0
+                changed = True
             if delivery.peak_normalize and peak > 1e-6:
                 target_peak = 10 ** (_PEAK_TARGET_DBFS / 20.0)
                 gain = min(max(target_peak / peak, _PEAK_GAIN_MIN), _PEAK_GAIN_MAX)
@@ -690,6 +820,10 @@ class MiMoVoicePlugin(MaiBotPlugin):
                     samples = samples * gain
                     peak = min(1.0, peak * gain)
                     changed = True
+            if peak > _SOFT_LIMIT_CEILING:
+                samples = soft_limit(samples, _SOFT_LIMIT_CEILING)
+                peak = min(_SOFT_LIMIT_CEILING, peak)
+                changed = True
             if delivery.tail_pad_ms > 0:
                 pad_frames = int(rate * delivery.tail_pad_ms / 1000.0)
                 if pad_frames > 0:
@@ -750,7 +884,10 @@ class MiMoVoicePlugin(MaiBotPlugin):
             self._warn_once("numpy:timbre", "音色对齐需要 numpy，当前环境没有，按关闭处理")
             return None
         try:
-            pcm, rate = _read_wav_pcm(path.read_bytes())
+            payload = self._prepared_reference_bytes(path)
+            if payload is None:
+                payload = path.read_bytes()
+            pcm, rate = _read_wav_pcm(payload)
         except Exception as exc:
             self._warn_once("timbre:read", "音色对齐读取参考音频失败（%s），按关闭处理", exc)
             return None

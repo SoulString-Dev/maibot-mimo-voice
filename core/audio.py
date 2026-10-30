@@ -135,6 +135,193 @@ def _apply_gain_curve(pcm: Any, rate: int, gains_db: Any) -> Any:
     return out
 
 
+def _frame_rms(pcm: Any, rate: int, frame_ms: float = 20.0) -> Any:
+    """按 20ms 分帧算 RMS，用于参考音频的静音分析（够用且不受单点毛刺影响）。"""
+    np = _numpy()
+    if np is None:  # pragma: no cover
+        raise RuntimeError("音频处理需要 numpy")
+    frame = max(1, int(rate * frame_ms / 1000.0))
+    count = len(pcm) // frame
+    if count == 0:
+        return np.asarray([float(np.sqrt(np.mean(np.square(pcm))))] if len(pcm) else [])
+    blocks = np.asarray(pcm[: count * frame], dtype=np.float32).reshape(count, frame)
+    return np.sqrt(np.mean(np.square(blocks), axis=1))
+
+
+def analyze_reference(pcm: Any, rate: int, silence_dbfs: float = -45.0) -> Dict[str, float]:
+    """参考音频体检：时长、静音占比、最长静音、首尾静音。
+
+    只看"像不像一段干净的单句素材"：时长 2–5s、静音少、句间没有长停顿。
+    """
+    np = _numpy()
+    empty = {"duration": 0.0, "silence_ratio": 0.0, "longest_silence": 0.0,
+             "head_silence": 0.0, "tail_silence": 0.0}
+    if np is None or rate <= 0 or len(pcm) == 0:
+        return empty
+    rms = _frame_rms(pcm, rate)
+    if rms.size == 0:
+        return empty
+    silent = rms < float(10 ** (silence_dbfs / 20.0))
+    duration = len(pcm) / float(rate)
+    ratio = float(silent.mean())
+    longest = 0
+    run = 0
+    for flag in silent.tolist():
+        run = run + 1 if flag else 0
+        longest = max(longest, run)
+    head = 0
+    for flag in silent.tolist():
+        if not flag:
+            break
+        head += 1
+    tail = 0
+    for flag in reversed(silent.tolist()):
+        if not flag:
+            break
+        tail += 1
+    frame_seconds = 0.02
+    return {
+        "duration": duration,
+        "silence_ratio": ratio,
+        "longest_silence": longest * frame_seconds,
+        "head_silence": head * frame_seconds,
+        "tail_silence": tail * frame_seconds,
+    }
+
+
+def _voiced_segments(
+    pcm: Any,
+    rate: int,
+    silence_dbfs: float = -45.0,
+    min_seconds: float = 0.25,
+    gap_seconds: float = 0.15,
+) -> list:
+    """把参考音频切成"有声音的句子"：短静音并进句子，过短的碎片丢掉。"""
+    np = _numpy()
+    if np is None:  # pragma: no cover
+        raise RuntimeError("音频处理需要 numpy")
+    frame = max(1, int(rate * 0.02))
+    rms = _frame_rms(pcm, rate)
+    if rms.size == 0:
+        return []
+    silent = rms < float(10 ** (silence_dbfs / 20.0))
+    # 先合并太短的静音（气口），再按静音切开
+    max_gap_frames = max(1, int(gap_seconds / 0.02))
+    flags = silent.tolist()
+    index = 0
+    while index < len(flags):
+        if flags[index]:
+            end = index
+            while end < len(flags) and flags[end]:
+                end += 1
+            if (end - index) < max_gap_frames:
+                for pos in range(index, end):
+                    flags[pos] = False
+            index = end
+        else:
+            index += 1
+    segments = []
+    start = None
+    for pos, flag in enumerate([*flags, True]):
+        if not flag and start is None:
+            start = pos
+        elif flag and start is not None:
+            begin = start * frame
+            finish = min(len(pcm), pos * frame)
+            if (finish - begin) >= int(min_seconds * rate):
+                segments.append((begin, finish))
+            start = None
+    return segments
+
+
+def prepare_reference(
+    pcm: Any,
+    rate: int,
+    target_seconds: float = 3.7,
+    max_seconds: float = 5.0,
+    silence_dbfs: float = -45.0,
+    target_peak_dbfs: float = -3.0,
+    gap_seconds: float = 0.12,
+    min_segment_seconds: float = 0.25,
+) -> Tuple[Any, Dict[str, Any]]:
+    """把长参考音频瘦身成"单句拼接"版本：按原顺序取句，去句间长静音，峰值归一。
+
+    返回 (pcm, meta)。已经是短且干净的素材时同样会走一遍（幂等），调用方可以先用
+    ``analyze_reference`` 判断值不值得处理。
+    """
+    np = _numpy()
+    if np is None:  # pragma: no cover
+        raise RuntimeError("音频处理需要 numpy")
+    segments = _voiced_segments(pcm, rate, silence_dbfs=silence_dbfs, min_seconds=min_segment_seconds)
+    source_seconds = len(pcm) / float(rate)
+    if not segments:
+        return pcm, {"duration": source_seconds, "segments": 0, "source_seconds": source_seconds}
+    gap = np.zeros(max(0, int(rate * gap_seconds)), dtype=np.float32)
+    budget = int(max_seconds * rate)
+    pieces = []
+    used = 0
+    picked = 0
+    for begin, finish in segments:
+        piece = pcm[begin:finish]
+        room = budget - used
+        if room <= 0:
+            break
+        take = min(piece.size, room)
+        pieces.append(piece[:take])
+        picked += 1
+        used += take
+        if used >= int(target_seconds * rate):
+            break
+        if gap.size and used + gap.size <= budget:
+            pieces.append(gap)
+            used += gap.size
+    out = np.concatenate(pieces)[:budget] if pieces else pcm
+    peak = float(np.max(np.abs(out))) if len(out) else 0.0
+    if peak > 1e-6:
+        out = (out * (10 ** (target_peak_dbfs / 20.0) / peak)).astype(np.float32)
+    meta = {
+        "duration": len(out) / float(rate),
+        "segments": picked,
+        "source_seconds": source_seconds,
+    }
+    return out, meta
+
+
+def smooth_gain_bands(gains_db: Any, radius: int = 1) -> Any:
+    """把相邻频带的增益做一次移动平均，避免某个频带单独顶到上限造成"闷/金属感"。"""
+    np = _numpy()
+    if np is None:  # pragma: no cover
+        raise RuntimeError("音频处理需要 numpy")
+    arr = np.asarray(gains_db, dtype=np.float64)
+    if arr.size < 3 or radius <= 0:
+        return arr.astype(np.float32)
+    padded = np.pad(arr, (radius, radius), mode="edge")
+    kernel = np.ones(2 * radius + 1, dtype=np.float64) / float(2 * radius + 1)
+    smoothed = np.convolve(padded, kernel, mode="same")[radius:-radius]
+    return smoothed.astype(np.float32)
+
+
+def soft_limit(pcm: Any, ceiling: float = 0.97) -> Any:
+    """软限幅：超过拐点（0.85×天花板）的峰值用 tanh 压回，不引入硬削顶。
+
+    实测后处理会把原始削顶放大成明显破音，这一步在峰值归一之前兜底。
+    """
+    np = _numpy()
+    if np is None:  # pragma: no cover
+        raise RuntimeError("音频处理需要 numpy")
+    data = np.asarray(pcm, dtype=np.float32)
+    if data.size == 0:
+        return data
+    limit = float(ceiling)
+    knee = limit * 0.85
+    magnitude = np.abs(data)
+    if magnitude.size == 0 or float(np.max(magnitude)) <= knee:
+        return data
+    scaled = knee + (limit - knee) * np.tanh(np.maximum(magnitude - knee, 0.0) / max(limit - knee, 1e-6))
+    result = np.where(magnitude <= knee, data, np.sign(data) * scaled)
+    return result.astype(np.float32)
+
+
 def _read_wav_pcm(audio: bytes) -> Tuple[Any, int]:
     np = _numpy()
     if np is None:  # pragma: no cover
