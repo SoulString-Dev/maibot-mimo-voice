@@ -132,7 +132,7 @@ class VoiceConfig(PluginConfigBase):
 
     preset: Literal["理塘王", "冰糖", "茉莉", "自定义"] = Field(
         default="理塘王",
-        description="音色：理塘王（低沉、口音重，默认）、冰糖（偏亮、偏年轻）、茉莉（偏低、更柔和）、自定义（用 reference_path 指定的文件）；"
+        description="音色：理塘王（低沉、口音重）、冰糖（偏亮、偏年轻）、茉莉（偏低、更柔和）、自定义（用 reference_path 指定的文件）；"
         "配置文件里写旧写法 bingtang / jasmine / litang / custom 也能读，会自动换成对应的中文名",
     )
     reference_path: str = Field(
