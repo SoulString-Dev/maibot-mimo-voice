@@ -241,7 +241,7 @@ def prepare_reference(
     max_seconds: float = 5.0,
     silence_dbfs: float = -45.0,
     target_peak_dbfs: float = -3.0,
-    gap_seconds: float = 0.12,
+    gap_seconds: float = 0.15,
     min_segment_seconds: float = 0.25,
 ) -> Tuple[Any, Dict[str, Any]]:
     """把长参考音频瘦身成"单句拼接"版本：按原顺序取句，去句间长静音，峰值归一。
