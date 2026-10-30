@@ -1,6 +1,6 @@
 # maibot-mimo-voice
 
-把麦麦（MaiBot）的**纯文本回复**按策略换成 MiMo 语音条。开箱自带两套标准音色（冰糖 / 茉莉），也可以换成自己的参考音频。
+把麦麦（MaiBot）的**纯文本回复**按策略换成 MiMo 语音条。开箱自带三套标准音色（冰糖 / 茉莉 / 理塘王），也可以换成自己的参考音频。
 
 思路参考 [Ling-LA/ling-tts-bot](https://github.com/Ling-LA/ling-tts-bot)（MIT），本仓库在触发方式、文本清洗与工程细节上做了重写，差异见下表。
 
@@ -15,7 +15,7 @@
 
 | 与上游的差异 | 原因 |
 |---|---|
-| 内置冰糖 / 茉莉两套参考音频，`voice.preset` 一键切换 | 自带的克隆样本不具普适性；开箱就能出声，想定制再换 `custom` |
+| 内置冰糖 / 茉莉 / 理塘王三套参考音频，`voice.preset` 一键切换（写中文名即可） | 自带的克隆样本不具普适性；开箱就能出声，想定制再换 `自定义` |
 | 默认 `random` + `probability = 0.15` + 短句门槛 60 字 | 全量转语音太激进；语音集中在短句上更像真人插话。0.15 下大约每 7–10 条回复出一条语音，既有存在感又不吵 |
 | `random_llm` 双触发：随机抽签 + 模型可调 `mimo_voice_say` 主动要语音 | 群友想听声音时能立刻出声，日常仍由概率控制频率 |
 | 支持群聊 / 私聊 `all / whitelist / blacklist` | 灰度上线时可以先只在指定群或私聊里出声 |
@@ -31,8 +31,8 @@
 
 1. 把仓库放进麦麦的插件目录（如 `data/MaiMBot/plugins/maibot-mimo-voice`）。
 2. 复制 `config.example.toml` 为 `config.toml`，填好 `[mimo] api_key`。
-3. 音色默认用内置的冰糖（`voice.preset = "bingtang"`），不需要自己准备参考音频；
-   想换成自己的声音时，把参考音频放进插件目录并把 `voice.preset` 改成 `custom`。
+3. 音色默认用内置的冰糖（`voice.preset = "冰糖"`），不需要自己准备参考音频；
+   想换成自己的声音时，把参考音频放进插件目录并把 `voice.preset` 改成 `自定义`。
 4. 生效方式：重启核心，或者直接改插件目录里的文件——麦麦的文件监视会自动重载扩展插件。
 
 维护与发版细节见 [`docs/MAINTAINING.md`](docs/MAINTAINING.md)。
@@ -43,11 +43,14 @@
 
 | `voice.preset` | 音色 | 说明 |
 |---|---|---|
-| `bingtang` | 冰糖（默认） | MiMo 预置女声，按「升 12% 音高 + 22% 总语速」生成，约 2.9 秒参考 |
-| `jasmine` | 茉莉 | 比冰糖略低、更柔和一些，约 3.2 秒参考 |
-| `custom` | 自定义 | 用 `voice.reference_path` 指向你自己的参考音频（放插件数据目录的 `references/` 下） |
+| `冰糖`（默认） | 冰糖 | MiMo 预置女声，按「升 12% 音高 + 22% 总语速」生成，约 2.9 秒参考 |
+| `茉莉` | 茉莉 | 比冰糖略低、更柔和一些，约 3.2 秒参考 |
+| `理塘王` | 理塘王 | 低沉、带口音的男声，约 4.8 秒参考（两句拼接） |
+| `自定义` | 自定义 | 用 `voice.reference_path` 指向你自己的参考音频（放插件数据目录的 `references/` 下） |
 
-两套内置参考都是**合成音色**（不是真人录音），随插件分发。
+接口也接受旧写法 `bingtang` / `jasmine` / `litang` / `custom`，配置里写哪个都行，插件内部统一处理。
+
+三套内置参考都是**合成音色**（不是真人录音），随插件分发。
 生成方式：先用 MiMo 预置音色生成原始采样，再跑 `tools/build_reference.sh`（升调 1.12、`atempo` 1.08、裁首尾静音）。
 
 ## 换成自己的声音
@@ -78,7 +81,7 @@ ffmpeg -i source.wav -af "aresample=24000,asetrate=24000*1.12,aresample=24000,at
 
 ```toml
 [voice]
-preset = "custom"
+preset = "自定义"
 reference_path = "我的音色.wav"
 ```
 
@@ -119,7 +122,7 @@ private_mode = "all"
 |---|---|---|
 | `plugin.enabled` | `true` | 总开关 |
 | `mimo.api_key` | 空 | MiMo 官方 API Key |
-| `voice.preset` | `bingtang` | 音色：`bingtang` / `jasmine` / `custom` |
+| `voice.preset` | `冰糖` | 音色：`冰糖` / `茉莉` / `理塘王` / `自定义`（也认 `bingtang` / `jasmine` / `litang` / `custom`） |
 | `trigger.mode` | `random` | 见「触发方式」 |
 | `trigger.probability` | `0.15` | `random` / `random_llm` 模式下每条回复转语音的概率。低于 0.1 基本感知不到，太高会显得吵 |
 | `trigger.short_reply_max_chars` | `60` | 随机转语音的字数门槛（0 = 不限制）；模型主动请求不受限 |
@@ -146,7 +149,7 @@ private_mode = "all"
 | `mimo.retry_backoff_seconds` | `1.5` | 重试退避基数，按 2 的幂增长 |
 | `mimo.connect_timeout` | `10.0` | 建连超时（秒），与整体超时分开 |
 | `mimo.allow_private_base_url` | `false` | 允许把音频发往内网/本机地址（只有自建代理时才需要） |
-| `voice.reference_path` | `reference.wav` | 仅 `preset = custom` 时生效，填 `references/` 下的文件名 |
+| `voice.reference_path` | `reference.wav` | 仅 `preset = 自定义` 时生效，填 `references/` 下的文件名 |
 | `voice.reference_strategy` | `single_file` | 需要 ffmpeg 的策略：`best_single` / `balanced` / `full_merge` |
 | `voice.auto_prepare_reference` | `true` | 参考 WAV 超过 5 秒或静音偏多时，自动按句拼接成 3–5 秒的干净样本并缓存（0.5.2 新增） |
 | `trigger.decision_ttl` | `10.0` | 判定有效期（秒） |
@@ -208,6 +211,7 @@ private_mode = "all"
 ├── assets/icon.svg              # 商店图标
 ├── reference-bingtang.wav       # 内置参考（随插件发布）
 ├── reference-jasmine.wav
+├── reference-litang.wav
 └── test.wav                     # 你自己的参考（仅本机，已被 .gitignore 忽略）
 
 <插件数据目录>/                   # 宿主提供，升级不会覆盖
@@ -311,7 +315,7 @@ ssh user@nas 'cd <插件目录> && tar xzf /tmp/mv.tgz && sudo chown -R 1000:100
 
 插件目录里的文件被改动后，麦麦的文件监视会自动重载扩展插件；`plugin.py` 的语法错误会让**所有**扩展插件一起停摆，改完务必先本地 `py_compile`。
 
-仓库里只提交两套内置音色（`reference-bingtang.wav` / `reference-jasmine.wav`，白名单放行）；
+仓库里只提交三套内置音色（`reference-bingtang.wav` / `reference-jasmine.wav` / `reference-litang.wav`，白名单放行）；
 你自己的参考音频和 `references/`、`voices/` 都已被 `.gitignore` 排除，不会被误提交。
 
 回滚：`git checkout <上个版本> -- plugin.py` 后重新铺文件即可；配置项只增不减，旧配置一般无需改。

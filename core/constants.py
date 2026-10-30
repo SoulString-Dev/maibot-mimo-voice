@@ -45,6 +45,24 @@ _SCOPE_CACHE_MAX_ENTRIES = 5000
 PRESET_REFERENCE_FILES = {
     "bingtang": "reference-bingtang.wav",
     "jasmine": "reference-jasmine.wav",
+    "litang": "reference-litang.wav",
+}
+# 配置里允许写中文名（也更适合宿主界面），内部统一换成短 id 再解析参考音频。
+PRESET_ALIASES = {
+    "冰糖": "bingtang",
+    "bingtang": "bingtang",
+    "茉莉": "jasmine",
+    "jasmine": "jasmine",
+    "理塘王": "litang",
+    "litang": "litang",
+    "自定义": "custom",
+    "custom": "custom",
+}
+PRESET_DISPLAY_NAMES = {
+    "bingtang": "冰糖",
+    "jasmine": "茉莉",
+    "litang": "理塘王",
+    "custom": "自定义",
 }
 
 _REFERENCE_SAMPLE_RATE = 24000

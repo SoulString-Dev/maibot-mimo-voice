@@ -54,6 +54,22 @@ expected = {
 for key, want in expected.items():
     checker.equal(f"默认 {key}", defaults[key], want)
 
+# ---------------------------------------------------------------- 音色别名
+checker.equal("默认音色收敛成 id", cfg.MiMoVoiceConfig().voice.preset, "bingtang")
+for raw, want in (
+    ("冰糖", "bingtang"),
+    ("茉莉", "jasmine"),
+    ("理塘王", "litang"),
+    ("自定义", "custom"),
+    ("bingtang", "bingtang"),
+    (" Litang ", "litang"),
+):
+    checker.equal(f"音色别名 {raw!r}", cfg.MiMoVoiceConfig(voice={"preset": raw}).voice.preset, want)
+builtin_files = {path.name for path in REPO_ROOT.glob("reference-*.wav")}
+checker.check("内置音色文件齐全",
+              {"reference-bingtang.wav", "reference-jasmine.wav", "reference-litang.wav"} <= builtin_files,
+              f"{sorted(builtin_files)}")
+
 # ---------------------------------------------------------------- 地址守卫
 checker.equal("官方地址放行", cfg._api_base_url_problem("https://api.xiaomimimo.com/v1", allow_private=False), "")
 checker.equal("http 被拒", cfg._api_base_url_problem("http://api.xiaomimimo.com/v1", allow_private=False), "不是 https")

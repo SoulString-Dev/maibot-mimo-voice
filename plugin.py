@@ -85,6 +85,8 @@ from .core.constants import (
     _TIMBRE_FULL_STRENGTH_DB,
     _TIMBRE_MAX_GAIN_DB,
     _TTL_CACHE_MAX_ENTRIES,
+    PRESET_ALIASES,
+    PRESET_DISPLAY_NAMES,
     PRESET_REFERENCE_FILES,
     SUPPORTED_REFERENCE_SUFFIXES,
     VOICE_SEGMENT_TYPE,
@@ -148,7 +150,7 @@ class MiMoVoicePlugin(MaiBotPlugin):
             "MiMo 语音插件已加载：音色=%s, mode=%s, probability=%.2f, 短句上限=%d字, 合成=%s, "
             "风格指令=%s, 参考策略=%s, 英文=%s, 随机需纯中文=%s, 超时重试=%s, 音色对齐=%s, "
             "尾部裁剪=%dms, 尾部补静音=%dms, 峰值归一=%s, 群聊放行=%s, 私聊放行=%s",
-            self.config.voice.preset,
+            PRESET_DISPLAY_NAMES.get(self.config.voice.preset, self.config.voice.preset),
             self.config.trigger.mode,
             self.config.trigger.probability,
             int(self.config.trigger.short_reply_max_chars),
@@ -292,7 +294,8 @@ class MiMoVoicePlugin(MaiBotPlugin):
 
     def _reference_path(self) -> Path:
         """解析当前要用的参考音频：内置预设优先，找不到再退回 voice.reference_path。"""
-        preset = str(getattr(self.config.voice, "preset", "custom") or "custom").strip().lower()
+        raw_preset = str(getattr(self.config.voice, "preset", "custom") or "custom").strip()
+        preset = PRESET_ALIASES.get(raw_preset.lower()) or PRESET_ALIASES.get(raw_preset) or raw_preset.lower()
         preset_file = PRESET_REFERENCE_FILES.get(preset)
         if preset_file:
             candidate = self._preset_path(preset_file)
@@ -301,7 +304,7 @@ class MiMoVoicePlugin(MaiBotPlugin):
             self._warn_once(
                 f"builtin:{preset}",
                 "内置音色 %s 的参考音频缺失（%s），回退到 voice.reference_path",
-                preset,
+                PRESET_DISPLAY_NAMES.get(preset, preset),
                 preset_file,
             )
         return self._locate_user_file(self.config.voice.reference_path, "reference.wav", "voice.reference_path")
@@ -506,6 +509,9 @@ class MiMoVoicePlugin(MaiBotPlugin):
         if path.suffix.lower() != ".wav" or _numpy() is None:
             self.ctx.logger.info("参考音频：%s（非 WAV 或缺少 numpy，未做体检）", path.name)
             return
+        if path.name in PRESET_REFERENCE_FILES.values():
+            self.ctx.logger.info("参考音频：%s（内置音色，已随版本校验，跳过体检）", path.name)
+            return
         try:
             pcm, rate = _read_wav_pcm(path.read_bytes())
         except Exception as exc:
@@ -560,6 +566,8 @@ class MiMoVoicePlugin(MaiBotPlugin):
             return None
         if path.suffix.lower() != ".wav" or _numpy() is None:
             return None
+        if path.name in PRESET_REFERENCE_FILES.values():
+            return None  # 内置音色是随版本校验过的成品，不做二次加工
         output = self._cache_dir() / f"prepared-{self._prepare_signature(path)}.wav"
         if output.is_file() and output.stat().st_size > 0:
             return output.read_bytes()

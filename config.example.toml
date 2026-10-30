@@ -62,11 +62,13 @@ connect_timeout = 10.0
 [voice]
 # ---- 音色 ----
 # 用哪个音色（下拉）：
-#   bingtang  内置冰糖：偏亮、偏年轻，随插件分发，开箱即用
-#   jasmine   内置茉莉：略低、更柔和
-#   custom    自定义：用你自己提供的参考音频，配下面的 reference_path
-preset = "bingtang"
-# 仅 preset = "custom" 时生效：只写文件名即可（例如 我的音色.wav）。
+#   冰糖    内置冰糖：偏亮、偏年轻，随插件分发，开箱即用
+#   茉莉    内置茉莉：略低、更柔和
+#   理塘王  内置理塘王：低沉、带口音，随插件分发
+#   自定义  用你自己提供的参考音频，配下面的 reference_path
+# 旧写法 bingtang / jasmine / litang / custom 仍然可用。
+preset = "冰糖"
+# 仅 preset = "自定义" 时生效：只写文件名即可（例如 我的音色.wav）。
 # 文件放在插件数据目录的 references/ 下；为兼容旧版本，放插件根目录也能读到。
 # 建议 3–10 秒、干净无背景音、单人说话的 24 kHz 单声道 WAV。
 reference_path = "reference.wav"

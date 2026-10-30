@@ -7,9 +7,9 @@ from typing import List, Literal
 from urllib.parse import urlsplit
 
 from maibot_sdk import Field, PluginConfigBase
-from pydantic import model_validator
+from pydantic import field_validator, model_validator
 
-from .constants import _DEFAULT_API_BASE, DEFAULT_STYLE_INSTRUCTION
+from .constants import _DEFAULT_API_BASE, DEFAULT_STYLE_INSTRUCTION, PRESET_ALIASES
 
 _CONFIG_WARNINGS: List[str] = []
 
@@ -129,9 +129,13 @@ class VoiceConfig(PluginConfigBase):
 
     __ui_label__ = "音色"
 
-    preset: Literal["bingtang", "jasmine", "custom"] = Field(
+    preset: Literal[
+        "冰糖", "茉莉", "理塘王", "自定义",
+        "bingtang", "jasmine", "litang", "custom",
+    ] = Field(
         default="bingtang",
-        description="音色：bingtang=内置冰糖（偏亮）、jasmine=内置茉莉（偏低偏柔）、custom=用 reference_path 指定的自定义参考音频",
+        description="音色：冰糖（偏亮，默认）、茉莉（偏低偏柔）、理塘王（低沉、口音重）、自定义（用 reference_path 指定的文件）；"
+        "也接受旧写法 bingtang / jasmine / litang / custom",
     )
     reference_path: str = Field(
         default="reference.wav",
@@ -151,6 +155,19 @@ class VoiceConfig(PluginConfigBase):
         default=DEFAULT_STYLE_INSTRUCTION,
         description="随请求发送的朗读风格指令。它决定语速和语气，改动后听感变化很大；留空表示不发送",
     )
+
+    @field_validator("preset", mode="before")
+    @classmethod
+    def _canonical_preset(cls, value: object) -> str:
+        """把中文名（或旧写法、大小写/空格变体）统一收敛成内部 id，后续解析参考音频只看 id。"""
+        text = str(value or "").strip()
+        if not text:
+            return "bingtang"
+        canonical = PRESET_ALIASES.get(text.lower()) or PRESET_ALIASES.get(text)
+        if canonical is None:
+            allowed = "、".join(name for name in PRESET_ALIASES if not name.isascii())
+            raise ValueError(f"未知音色 {value!r}，只能是 {allowed} 或 bingtang/jasmine/litang/custom")
+        return canonical
 
 
 class MiMoConfig(PluginConfigBase):
