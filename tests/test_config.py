@@ -35,7 +35,7 @@ defaults = {
     "allow_private_base_url": config.mimo.allow_private_base_url,
 }
 expected = {
-    "mode": "random",
+    "mode": "random_llm",
     "probability": 0.15,
     "english_policy": "strip_tics",
     "random_requires_chinese": True,

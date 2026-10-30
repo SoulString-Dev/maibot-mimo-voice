@@ -6,7 +6,7 @@
 
 | 项 | 值 |
 |---|---|
-| 插件 | MiMo 语音回复（把麦麦的纯文本回复按比例替换成语音条） |
+| 插件 | MiMo TTS 语音回复（把麦麦的纯文本回复按比例替换成语音条） |
 | 插件 id | `github.SoulString-Dev.maibot-mimo-voice` |
 | 仓库 | https://github.com/SoulString-Dev/maibot-mimo-voice |
 | 上游 | fork 自 `Ling-LA/ling-tts-bot`（MIT，保留版权声明） |

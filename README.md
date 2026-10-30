@@ -1,6 +1,6 @@
-# maibot-mimo-voice
+# maibot-mimo-voice（MiMo TTS 语音回复）
 
-把麦麦（MaiBot）的**纯文本回复**按策略换成 MiMo 语音条。开箱自带三套标准音色（冰糖 / 茉莉 / 理塘王），也可以换成自己的参考音频。
+把麦麦（MaiBot）的**纯文本回复**按策略换成 MiMo 语音条。开箱自带「理塘王」与 MiMo 默认女角色音色，也可以换成自己的参考音频。
 
 思路参考 [Ling-LA/ling-tts-bot](https://github.com/Ling-LA/ling-tts-bot)（MIT），本仓库在触发方式、文本清洗与工程细节上做了重写，差异见下表。
 
@@ -15,8 +15,8 @@
 
 | 与上游的差异 | 原因 |
 |---|---|
-| 内置冰糖 / 茉莉 / 理塘王三套参考音频，`voice.preset` 一键切换（写中文名即可） | 自带的克隆样本不具普适性；开箱就能出声，想定制再换 `自定义` |
-| 默认 `random` + `probability = 0.15` + 短句门槛 60 字 | 全量转语音太激进；语音集中在短句上更像真人插话。0.15 下大约每 7–10 条回复出一条语音，既有存在感又不吵 |
+| 内置理塘王与 MiMo 默认女角色参考音频，`voice.preset` 一键切换（写中文名即可） | 自带的克隆样本不具普适性；开箱就能出声，想定制再换 `自定义`。理塘王实测克隆距离中位 3.39 dB，比默认女声更稳 |
+| 默认 `random_llm` + `probability = 0.15` + 短句门槛 60 字 | 全量转语音太激进；语音集中在短句上更像真人插话。0.15 下大约每 7–10 条回复出一条语音，既有存在感又不吵。默认开着模型主动请求，刚装好想试听时直接让它"说一句"即可，不用等抽签 |
 | `random_llm` 双触发：随机抽签 + 模型可调 `mimo_voice_say` 主动要语音 | 群友想听声音时能立刻出声，日常仍由概率控制频率 |
 | 支持群聊 / 私聊 `all / whitelist / blacklist` | 灰度上线时可以先只在指定群或私聊里出声 |
 | 参考音频支持固定单文件，也保留 `best_single / balanced / full_merge` | 单文件不需要 ffmpeg；需要自动挑选 / 拼接时仍可用原策略 |
@@ -29,11 +29,17 @@
 
 ## 安装
 
+### 从插件市场安装（推荐）
+
+1. 打开麦麦 WebUI 的插件市场，搜「MiMo TTS」安装。
+2. 装完在插件配置页填 `mimo.api_key`（MiMo 官方控制台申请）。`config.toml` 由运行时按插件声明的配置模型自动生成，**不需要**手动复制 `config.example.toml`；想先弄清每一项的含义，可以对着它读注释。
+3. 音色默认是 MiMo 默认女角色（`voice.preset = "冰糖"`），不需要自己准备参考音频；想更稳可以切到内置的 `理塘王`，想用自己的声音就把音频放进 `references/` 并把 `voice.preset` 改成 `自定义`。
+4. 保存配置即热重载；升级新版本后重启核心，插件目录里的 `config.toml` 与数据目录的 `references/` 都会保留。
+
+### 手动放进插件目录
+
 1. 把仓库放进麦麦的插件目录（如 `data/MaiMBot/plugins/maibot-mimo-voice`）。
-2. 复制 `config.example.toml` 为 `config.toml`，填好 `[mimo] api_key`。
-3. 音色默认用内置的冰糖（`voice.preset = "冰糖"`），不需要自己准备参考音频；
-   想换成自己的声音时，把参考音频放进插件目录并把 `voice.preset` 改成 `自定义`。
-4. 生效方式：重启核心，或者直接改插件目录里的文件——麦麦的文件监视会自动重载扩展插件。
+2. 重启核心。首次加载时若没有 `config.toml`，运行时会按配置模型生成一份（值即默认值），之后按上面第 2、3 步填 API Key、选音色即可。
 
 维护与发版细节见 [`docs/MAINTAINING.md`](docs/MAINTAINING.md)。
 
@@ -43,9 +49,9 @@
 
 | `voice.preset` | 音色 | 说明 |
 |---|---|---|
-| `冰糖`（默认） | 冰糖 | MiMo 预置女声，按「升 12% 音高 + 22% 总语速」生成，约 2.9 秒参考 |
-| `茉莉` | 茉莉 | 比冰糖略低、更柔和一些，约 3.2 秒参考 |
-| `理塘王` | 理塘王 | 低沉、带口音的男声，约 4.8 秒参考（两句拼接） |
+| `理塘王` | 理塘王 | 低沉、带口音的男声，约 4.8 秒参考（两句拼接）。实测克隆输出与参考的频谱距离中位 3.39 dB，比默认女声更稳 |
+| `冰糖`（默认） | MiMo 默认女角色 · 冰糖 | MiMo 官方预置女声，偏亮，约 2.9 秒参考 |
+| `茉莉` | MiMo 默认女角色 · 茉莉 | 同系列女声，比冰糖略低、更柔和，约 3.2 秒参考 |
 | `自定义` | 自定义 | 用 `voice.reference_path` 指向你自己的参考音频（放插件数据目录的 `references/` 下） |
 
 接口也接受旧写法 `bingtang` / `jasmine` / `litang` / `custom`，配置里写哪个都行，插件内部统一处理。
@@ -64,7 +70,7 @@ data/plugins/github.SoulString-Dev.maibot-mimo-voice/
 ```
 
 目录不存在时插件会自动创建，启动日志里也会打印完整路径（`参考音频目录：…`）。
-`voice.reference_path` 只写文件名即可（为兼容旧版本，放在插件根目录也仍能读到）。
+`voice.reference_path` 只写文件名即可，插件会先找数据目录的 `references/`，再找插件根目录。
 
 推荐在**宿主机**上做，不用进容器：
 
@@ -91,11 +97,12 @@ reference_path = "我的音色.wav"
 
 | `trigger.mode` | 行为 |
 |---|---|
-| `random`（默认） | 每条回复按 `probability` 抽签；抽中且不超过 `short_reply_max_chars` 才转语音 |
-| `random_llm` | 随机抽签照常，同时给 planner 暴露 `mimo_voice_say`，模型可以主动要求"这条用语音回" |
+| `random_llm`（默认） | 随机抽签照常，同时给 planner 暴露 `mimo_voice_say`，模型可以主动要求"这条用语音回" |
+| `random` | 每条回复按 `probability` 抽签；抽中且不超过 `short_reply_max_chars` 才转语音（不暴露工具，最省 token） |
 | `llm_trigger` | 默认语音优先，模型可调 `mimo_voice_text_reply` 把这一轮改回文字（代码、表格、链接等） |
 | `voice_only` | 全部转语音（仍受 `max_text_length` 与放行策略约束） |
 
+- 默认 `random_llm`：刚装好时不用等抽签，直接让麦麦"说一句"就能试听；`random` 只按概率抽签、不暴露任何模型工具。
 - 同一聊天流在 `trigger.decision_ttl`（默认 10 秒）内复用上一次的抽签结果，避免连发多条时概率失真。
 - **默认概率 0.15**：低于 0.1 时语音出现得太少、几乎察觉不到；想更频繁可以调到 0.25–0.4，想安静一点降到 0.05。再叠加 `short_reply_max_chars` 与 `random_requires_chinese` 的过滤，实际出语音的比例会略低于这个数。
 - 两种模型工具只在对应模式下暴露，其它模式自动隐藏，防止误调。
@@ -122,8 +129,8 @@ private_mode = "all"
 |---|---|---|
 | `plugin.enabled` | `true` | 总开关 |
 | `mimo.api_key` | 空 | MiMo 官方 API Key |
-| `voice.preset` | `冰糖` | 音色：`冰糖` / `茉莉` / `理塘王` / `自定义`（也认 `bingtang` / `jasmine` / `litang` / `custom`） |
-| `trigger.mode` | `random` | 见「触发方式」 |
+| `voice.preset` | `冰糖` | 音色：`理塘王` / `冰糖` / `茉莉` / `自定义`（`冰糖` / `茉莉` 是 MiMo 官方预置女声；也认旧写法 `bingtang` / `jasmine` / `litang` / `custom`） |
+| `trigger.mode` | `random_llm` | 见「触发方式」 |
 | `trigger.probability` | `0.15` | `random` / `random_llm` 模式下每条回复转语音的概率。低于 0.1 基本感知不到，太高会显得吵 |
 | `trigger.short_reply_max_chars` | `60` | 随机转语音的字数门槛（0 = 不限制）；模型主动请求不受限 |
 | `general.max_text_length` | `300` | 单条语音最多念多少字，超出按 `overflow_policy` 处理 |
@@ -179,6 +186,8 @@ private_mode = "all"
 | 10-28 | 354 | 51 | 14.4% |
 | 10-29（到 14:40） | 358 | 50 | 14.0% |
 
+> 10-30 起线上参考换成了内置「理塘王」（克隆距离中位 3.39 dB，旧参考 6.88 dB），这张表等观察一周再补。
+
 **为什么 10-27 的占比突然上来了？** 不是因为 bot 变得更爱说话，而是 10-26 那次上游抖动把语音吃掉了：
 
 - 能被抽中的"候选回复"并没有变多：10-26 是 303 条、10-27 反而只有 257 条（口径：单条文本、≤60 字、不含 2 个以上连续英文）。
@@ -205,7 +214,7 @@ private_mode = "all"
 │   ├── config.py                # 配置模型 + api_base_url 校验
 │   ├── text.py                  # 朗读清洗 / 英文口癖策略
 │   └── audio.py                 # WAV 读写 / 频谱曲线 / 音色对齐矩阵
-├── tests/                       # 79 条断言，不依赖 pytest
+├── tests/                       # 101 条断言，不依赖 pytest
 ├── config.example.toml
 ├── _manifest.json
 ├── assets/icon.svg              # 商店图标
@@ -224,7 +233,7 @@ private_mode = "all"
 
 ## FAQ
 
-**为什么这条回复没出语音？** 随机模式下要同时满足四条：
+**为什么这条回复没出语音？** 走随机路径（默认 `random_llm` 也是随机抽签）时要同时满足四条：
 
 1. `trigger.probability` 抽中（默认 15%）；
 2. 文本不超过 `trigger.short_reply_max_chars`（默认 60 字）；
@@ -253,12 +262,12 @@ private_mode = "all"
 
 ## 关于 ffmpeg（可选依赖）
 
-插件默认 `voice.reference_strategy = "single_file"`，**不调用任何外部命令**，所以大多数用户不需要装 ffmpeg。
+内置音色与默认的 `voice.reference_strategy = "single_file"` 都**不调用任何外部命令**，所以大多数用户不需要装 ffmpeg。
 
-只有把 `reference_strategy` 改成 `best_single` / `balanced` / `full_merge` 时，才会用宿主机的 `ffmpeg` 对**你自己提供的参考音频**做裁静音 / 截段 / 合并 / 重采样：
+只有选了 `自定义` 又把 `reference_strategy` 改成 `best_single` / `balanced` / `full_merge` 时，才会用宿主机的 `ffmpeg` 对**你自己提供的参考音频**做裁静音 / 截段 / 合并 / 重采样：
 
 - 调用方式是固定参数列表（`subprocess.run([...], check=True)`），不经 shell、不做字符串拼接，也没有任何聊天内容或用户输入拼进命令行；
-- 输入只有 `voices/` 目录下的音频文件和你配置的数值；
+- 输入只有 `references/` 目录（或插件根目录）下的音频文件和你配置的数值；
 - 不联网、不下载任何东西，只在本机做转码；
 - 处理结果缓存在 runtime 目录的 `reference-cache/`，同一份参考音频只处理一次。
 
@@ -268,6 +277,9 @@ private_mode = "all"
 
 ### 0.5.2
 
+- **改名 `MiMo TTS 语音回复`**，描述重写为「用 MiMo API 音色克隆…」：一眼能看出需要 MiMo API，理塘王前置，`冰糖` / `茉莉` 改称 MiMo 默认女角色。
+- `trigger.mode` 默认改为 **`random_llm`**：刚装好通常想先试一两条语音，默认暴露 `mimo_voice_say` 才试得出来；想要纯概率的旧行为改回 `random` 即可。
+- 安装说明按插件市场流程重写：`config.toml` 由运行时按配置模型自动生成，不需要手动复制 `config.example.toml`。
 - **参考音频自动瘦身**（`voice.auto_prepare_reference`，默认开）：参考 WAV 超过 5 秒或静音偏多时，纯 numpy 按句切分、拼接到 3–5 秒、峰值归一到 −3 dBFS，缓存复用；实测把 8.41 秒 / 4 段话 / 18.5% 静音的参考压到 3.83 秒 / 静音 6.8%，与人工挑选的片段平均频谱差 0.16 dB。
 - 启动体检：参考超过 6 秒、静音超过 15% 或最长静音超过 0.4 秒时打 warning，提示音色漂移风险（"2–5 秒单句"效果最好）。
 - 后处理修正：峰值归一上限从 +12 dB 收紧到 **+6 dB** 并加软限幅（不再放大破音）；音色对齐与参考差距 >8 dB 时自动减强度、相邻频带平滑（减少发闷）；尾部保留 50 ms → **150 ms**。
@@ -299,7 +311,7 @@ python -c "import tomllib; tomllib.load(open('config.example.toml','rb'))"
 pip install -r requirements-dev.txt
 ruff check .
 mypy plugin.py core   # 需先装 maibot-plugin-sdk，否则基类被当作 Any，会漏掉 self.config 的类型问题
-python tests/run_all.py     # 文本/音频/配置三组共 74 条断言
+python tests/run_all.py     # 文本/音频/配置三组共 101 条断言
 ```
 
 CI（`.github/workflows/ci.yml`）在每次 push / PR 上跑同样三条命令：ruff、mypy、单测。

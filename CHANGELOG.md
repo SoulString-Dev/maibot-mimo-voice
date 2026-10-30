@@ -18,6 +18,9 @@ README 只保留最新一版的要点。
 ### 修改
 
 - 峰值归一的上限从 +12 dB 收到 +6 dB（`_PEAK_GAIN_MAX` 4.0 → 2.0）：原上限会把安静输出里的呼吸、底噪一起抬出来，实测最多 +4.3 dB 就出现明显破音。
+- **插件改名为 `MiMo TTS 语音回复`**（`_manifest.json` 的 `name`）：id 不变，插件市场里搜「MiMo」「TTS」「语音」都能命中。`description` 重写为「用 MiMo API 音色克隆…」，开头点明依赖 MiMo API，内置理塘王排在前面，`冰糖` / `茉莉` 统一称 MiMo 默认女角色。
+- `trigger.mode` 默认值从 `random` 改为 **`random_llm`**：新装用户基本都要先试一两条语音，纯概率模式下模型没有 `mimo_voice_say` 工具、试不出来；要旧行为把 `trigger.mode` 写回 `random` 即可。
+- README 安装说明按插件市场流程重写：`config.toml` 由运行时按配置模型自动生成（`runner_main.py` 的 `_apply_plugin_config` 在文件缺失且插件声明了默认值时写入），不再要求手动复制 `config.example.toml`。
 - 音色对齐：频谱距离超过 8 dB 后按距离反比降低补偿强度（`_TIMBRE_FULL_STRENGTH_DB`），并对相邻频带增益做一次平滑——距离远说明这条本来就偏离参考，满强度硬怼只会更刺耳/更闷。
 - 尾部裁剪后保留的尾音从 50ms 增加到 150ms（`_TAIL_KEEP_SECONDS`），减少最后一个字尾音被吃掉。
 - 实测结论：**不做"合成两条选一条"**。12 条人工标注 vs 8 个客观指标（频谱距离、前后半段差异、f0、质心抖动、高频比、倒谱峰、谐噪比、jitter）全部重叠，自动选优准确率≈抛硬币，且并发翻倍会撞 429。

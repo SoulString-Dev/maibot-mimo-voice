@@ -60,8 +60,9 @@ class TriggerConfig(PluginConfigBase):
     __ui_label__ = "触发策略"
 
     mode: Literal["random", "random_llm", "llm_trigger", "voice_only"] = Field(
-        default="random",
-        description="random=按概率转语音；random_llm=概率抽签 + 模型主动请求（mimo_voice_say）；"
+        default="random_llm",
+        description="random_llm=概率抽签 + 模型可主动请求语音（mimo_voice_say，默认）；"
+        "random=只按概率转语音、不暴露工具；"
         "llm_trigger=语音优先、LLM 判断内容更适合文字时改文字；voice_only=所有纯文本都转语音",
     )
     probability: float = Field(
@@ -297,7 +298,7 @@ def _api_base_url_problem(url: str, *, allow_private: bool) -> str:
 
 
 class MiMoVoiceConfig(PluginConfigBase):
-    """MiMo 语音回复配置"""
+    """MiMo TTS 语音回复配置"""
 
     plugin: PluginSectionConfig = Field(default_factory=PluginSectionConfig)
     general: GeneralConfig = Field(default_factory=GeneralConfig)
