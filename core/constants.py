@@ -42,27 +42,28 @@ _SOFT_LIMIT_CEILING = 0.97
 _SCOPE_TTL_SECONDS = 12 * 3600.0
 _SCOPE_CACHE_MAX_ENTRIES = 5000
 # 内置音色：随插件分发的标准参考音频（由 MiMo 预置音色按同一套升调/裁剪流程生成）。
+# 键就是配置里显示的中文名，内部不再另设短 id。
 PRESET_REFERENCE_FILES = {
-    "bingtang": "reference-bingtang.wav",
-    "jasmine": "reference-jasmine.wav",
-    "litang": "reference-litang.wav",
+    "冰糖": "reference-bingtang.wav",
+    "茉莉": "reference-jasmine.wav",
+    "理塘王": "reference-litang.wav",
 }
-# 配置里允许写中文名（也更适合宿主界面），内部统一换成短 id 再解析参考音频。
+# 配置里只显示中文名；旧写法（含大小写/空格变体）仍然能读，读进来立刻换成中文名。
 PRESET_ALIASES = {
-    "冰糖": "bingtang",
-    "bingtang": "bingtang",
-    "茉莉": "jasmine",
-    "jasmine": "jasmine",
-    "理塘王": "litang",
-    "litang": "litang",
-    "自定义": "custom",
-    "custom": "custom",
+    "冰糖": "冰糖",
+    "bingtang": "冰糖",
+    "茉莉": "茉莉",
+    "jasmine": "茉莉",
+    "理塘王": "理塘王",
+    "litang": "理塘王",
+    "自定义": "自定义",
+    "custom": "自定义",
 }
 PRESET_DISPLAY_NAMES = {
-    "bingtang": "冰糖",
-    "jasmine": "茉莉",
-    "litang": "理塘王",
-    "custom": "自定义",
+    "冰糖": "冰糖",
+    "茉莉": "茉莉",
+    "理塘王": "理塘王",
+    "自定义": "自定义",
 }
 
 _REFERENCE_SAMPLE_RATE = 24000

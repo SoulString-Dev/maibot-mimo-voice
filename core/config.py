@@ -130,13 +130,10 @@ class VoiceConfig(PluginConfigBase):
 
     __ui_label__ = "音色"
 
-    preset: Literal[
-        "冰糖", "茉莉", "理塘王", "自定义",
-        "bingtang", "jasmine", "litang", "custom",
-    ] = Field(
-        default="bingtang",
-        description="音色：冰糖（偏亮，默认）、茉莉（偏低偏柔）、理塘王（低沉、口音重）、自定义（用 reference_path 指定的文件）；"
-        "也接受旧写法 bingtang / jasmine / litang / custom",
+    preset: Literal["理塘王", "冰糖", "茉莉", "自定义"] = Field(
+        default="理塘王",
+        description="音色：理塘王（低沉、口音重，默认）、冰糖（偏亮、偏年轻）、茉莉（偏低、更柔和）、自定义（用 reference_path 指定的文件）；"
+        "配置文件里写旧写法 bingtang / jasmine / litang / custom 也能读，会自动换成对应的中文名",
     )
     reference_path: str = Field(
         default="reference.wav",
@@ -160,14 +157,14 @@ class VoiceConfig(PluginConfigBase):
     @field_validator("preset", mode="before")
     @classmethod
     def _canonical_preset(cls, value: object) -> str:
-        """把中文名（或旧写法、大小写/空格变体）统一收敛成内部 id，后续解析参考音频只看 id。"""
+        """把旧写法、大小写/空格变体统一收敛成中文名，后续解析参考音频只看中文名。"""
         text = str(value or "").strip()
         if not text:
-            return "bingtang"
-        canonical = PRESET_ALIASES.get(text.lower()) or PRESET_ALIASES.get(text)
+            return "理塘王"
+        canonical = PRESET_ALIASES.get(text) or PRESET_ALIASES.get(text.lower())
         if canonical is None:
-            allowed = "、".join(name for name in PRESET_ALIASES if not name.isascii())
-            raise ValueError(f"未知音色 {value!r}，只能是 {allowed} 或 bingtang/jasmine/litang/custom")
+            allowed = "、".join(PRESET_ALIASES)
+            raise ValueError(f"未知音色 {value!r}，只能是 {allowed}")
         return canonical
 
 

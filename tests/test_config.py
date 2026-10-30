@@ -55,14 +55,16 @@ for key, want in expected.items():
     checker.equal(f"默认 {key}", defaults[key], want)
 
 # ---------------------------------------------------------------- 音色别名
-checker.equal("默认音色收敛成 id", cfg.MiMoVoiceConfig().voice.preset, "bingtang")
+checker.equal("默认音色是理塘王", cfg.MiMoVoiceConfig().voice.preset, "理塘王")
 for raw, want in (
-    ("冰糖", "bingtang"),
-    ("茉莉", "jasmine"),
-    ("理塘王", "litang"),
-    ("自定义", "custom"),
-    ("bingtang", "bingtang"),
-    (" Litang ", "litang"),
+    ("冰糖", "冰糖"),
+    ("茉莉", "茉莉"),
+    ("理塘王", "理塘王"),
+    ("自定义", "自定义"),
+    ("bingtang", "冰糖"),
+    ("jasmine", "茉莉"),
+    (" Litang ", "理塘王"),
+    ("CUSTOM", "自定义"),
 ):
     checker.equal(f"音色别名 {raw!r}", cfg.MiMoVoiceConfig(voice={"preset": raw}).voice.preset, want)
 builtin_files = {path.name for path in REPO_ROOT.glob("reference-*.wav")}

@@ -295,7 +295,7 @@ class MiMoVoicePlugin(MaiBotPlugin):
     def _reference_path(self) -> Path:
         """解析当前要用的参考音频：内置预设优先，找不到再退回 voice.reference_path。"""
         raw_preset = str(getattr(self.config.voice, "preset", "custom") or "custom").strip()
-        preset = PRESET_ALIASES.get(raw_preset.lower()) or PRESET_ALIASES.get(raw_preset) or raw_preset.lower()
+        preset = PRESET_ALIASES.get(raw_preset) or PRESET_ALIASES.get(raw_preset.lower()) or raw_preset
         preset_file = PRESET_REFERENCE_FILES.get(preset)
         if preset_file:
             candidate = self._preset_path(preset_file)
