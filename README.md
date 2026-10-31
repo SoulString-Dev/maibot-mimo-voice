@@ -286,7 +286,7 @@ private_mode = "all"
 
 ### 0.5.2
 
-- **改名 `MiMo TTS 语音回复`**，描述重写为「用 MiMo API 音色克隆…」：一眼能看出需要 MiMo API，理塘王前置，`冰糖` / `茉莉` 改称 MiMo 默认女角色。
+- **改名 `MiMo TTS 语音回复`**，描述重写为「用 MiMo 免费 API 音色克隆…」：一眼能看出需要 MiMo 的免费 API，理塘王前置，`冰糖` / `茉莉` 改称 MiMo 默认女角色。
 - `trigger.mode` 默认改为 **`random_llm`**：刚装好通常想先试一两条语音，默认暴露 `mimo_voice_say` 才试得出来；想要纯概率的旧行为改回 `random` 即可。
 - 部署说明按插件市场流程重写：新增「第一次用：注册并获取 API Key」分步指引；`config.toml` 由运行时按配置模型自动生成，不需要手动复制 `config.example.toml`。
 - **参考音频自动瘦身**（`voice.auto_prepare_reference`，默认开）：参考 WAV 超过 5 秒或静音偏多时，纯 numpy 按句切分、拼接到 3–5 秒、峰值归一到 −3 dBFS，缓存复用；实测把 8.41 秒 / 4 段话 / 18.5% 静音的参考压到 3.83 秒 / 静音 6.8%，与人工挑选的片段平均频谱差 0.16 dB。
