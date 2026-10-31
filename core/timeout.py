@@ -11,9 +11,11 @@
 from __future__ import annotations
 
 import math
-from typing import Iterable, Sequence
+from typing import Iterable, Optional, Sequence
 
 from .constants import (
+    _SYNTH_MIN_RETRY_SECONDS,
+    _SYNTH_TOTAL_BUDGET_SECONDS,
     _TIMEOUT_FACTOR,
     _TIMEOUT_MAX_SECONDS,
     _TIMEOUT_MIN_SAMPLES,
@@ -68,6 +70,26 @@ def effective_timeout(
     rounded = _round_up_to_step(clamped, float(step))
     # 取整后仍要守住硬上限，避免 step 把值顶出范围。
     return float(min(max(rounded, float(minimum)), float(maximum)))
+
+
+def retry_timeout(
+    elapsed: float,
+    timeout: float,
+    *,
+    budget: float = _SYNTH_TOTAL_BUDGET_SECONDS,
+    min_retry: float = _SYNTH_MIN_RETRY_SECONDS,
+) -> Optional[float]:
+    """超时后要不要补一次新请求；要补就返回这一次的超时（秒），不补返回 ``None``。
+
+    ``elapsed`` 是这条语音已经花掉的时间。补一次的价值在于"换一条新连接，
+    可能落到健康的上游节点"，所以它和"把超时放宽"不是一回事；但补一次不能
+    把单条回复拖到一分钟，也不能一直占着并发为 1 的唯一通道，因此：
+    剩余预算不足 ``min_retry`` 就不补，否则这次尝试的超时取 ``min(timeout, 剩余)``。
+    """
+    remaining = float(budget) - float(elapsed)
+    if remaining < float(min_retry):
+        return None
+    return float(min(float(timeout), remaining))
 
 
 def classify_failure(exc: BaseException) -> str:

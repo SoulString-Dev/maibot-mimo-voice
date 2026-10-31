@@ -47,7 +47,7 @@ expected = {
     "timeout": 20.0,
     "timeout_mode": "auto",
     "temperature": 0.15,
-    "retry_on_timeout": False,
+    "retry_on_timeout": True,
     "timbre_match": True,
     "trim_tail_silence_ms": 250,
     "tail_pad_ms": 120,

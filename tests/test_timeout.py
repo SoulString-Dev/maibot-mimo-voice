@@ -58,6 +58,14 @@ checker.equal(
     13.0,  # 9.1×1.4=12.74 → 13.0
 )
 
+# ---------------------------------------------------------------- 超时后补一次
+checker.equal("12s 超时后还能补（预算 30s）", timeout.retry_timeout(12.0, 12.0), 12.0)
+checker.equal("20s 超时后剩余 10s，按剩余算", timeout.retry_timeout(20.0, 20.0), 10.0)
+checker.equal("25s 超时后剩余 5s，不补", timeout.retry_timeout(25.0, 25.0), None)
+checker.equal("已用满预算则不补", timeout.retry_timeout(30.0, 12.0), None)
+checker.equal("超时比预算还长则不补", timeout.retry_timeout(31.0, 25.0), None)
+checker.equal("补的那次不会长于原超时", timeout.retry_timeout(5.0, 12.0), 12.0)
+
 # ---------------------------------------------------------------- 失败归类
 checker.equal("超时", timeout.classify_failure(TimeoutError("语音合成超时（20s）")), "timeout")
 checker.equal("429", timeout.classify_failure(RuntimeError("MiMo TTS 暂时不可用: 429 Too Many Requests")), "429")

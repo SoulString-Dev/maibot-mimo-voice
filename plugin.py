@@ -945,12 +945,16 @@ class MiMoVoicePlugin(MaiBotPlugin):
         """合成一次，并给每次请求埋点。
 
         成功记「语音合成耗时：3.42s（timeout 20.0s，第 1 次）」，失败记
-        「语音合成失败（类型=timeout/429/5xx/network/audio，耗时…，第 N 次）」。
+        「语音合成失败（类型=timeout/429/5xx/network/audio/other，耗时…，第 N 次）」。
 
-        超时的请求大多直接跳到 30 秒以上（不是刚好卡在边界），所以"再给它一次机会"
-        只在 ``retry_on_timeout`` 显式打开时才做；默认关，避免一次超时占满 40 秒单路。
+        超时后是否补一次新请求，由 ``core.timeout.retry_timeout`` 决定：这条语音
+        总共最多占用单路 ``_SYNTH_TOTAL_BUDGET_SECONDS``（30 秒），剩余预算不够
+        一次有意义的尝试就直接回退。补的价值是换一条新连接、可能落到健康节点，
+        和"把超时放宽"不是一回事；但 25s 再补 25s 会顶到 50s 并堵住唯一的并发通道。
         """
         retries = 1 if self.config.mimo.retry_on_timeout else 0
+        started_total = time.monotonic()
+        round_no = max(1, attempt)
         while True:
             started = time.monotonic()
             try:
@@ -961,11 +965,18 @@ class MiMoVoicePlugin(MaiBotPlugin):
                     "语音合成失败（类型=timeout，耗时 %.2fs，timeout %.1fs，第 %d 次）",
                     elapsed,
                     timeout,
-                    attempt,
+                    round_no,
                 )
+                next_timeout = None
                 if retries > 0:
-                    retries -= 1
-                    continue
+                    next_timeout = _timeout.retry_timeout(time.monotonic() - started_total, timeout)
+                    if next_timeout is not None:
+                        retries -= 1
+                        round_no += 1
+                        timeout = next_timeout
+                        self.ctx.logger.info("超时后补一次新请求（本次超时 %.1fs）", timeout)
+                        continue
+                    self.ctx.logger.info("超时后剩余预算不足，直接回退文字")
                 raise TimeoutError(f"语音合成超时（{timeout:.0f}s）") from exc
             except Exception as exc:
                 elapsed = time.monotonic() - started
@@ -974,13 +985,13 @@ class MiMoVoicePlugin(MaiBotPlugin):
                     _timeout.classify_failure(exc),
                     elapsed,
                     timeout,
-                    attempt,
+                    round_no,
                     exc,
                 )
                 raise
             elapsed = time.monotonic() - started
             self._synth_durations.append(elapsed)
-            self.ctx.logger.info("语音合成耗时：%.2fs（timeout %.1fs，第 %d 次）", elapsed, timeout, attempt)
+            self.ctx.logger.info("语音合成耗时：%.2fs（timeout %.1fs，第 %d 次）", elapsed, timeout, round_no)
             return payload
 
     async def _synthesize_guarded(self, text: str) -> bytes:

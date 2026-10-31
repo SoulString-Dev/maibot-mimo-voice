@@ -97,3 +97,8 @@ _TIMEOUT_FACTOR = 1.4
 _TIMEOUT_MIN_SECONDS = 12.0
 _TIMEOUT_MAX_SECONDS = 25.0
 _TIMEOUT_STEP_SECONDS = 0.5
+# 超时后补一次新请求的总时长预算：单条语音最多占用单路这么久。
+# 25s 的超时 + 再补 25s 会顶到 50s，还会堵住并发为 1 的唯一通道，
+# 所以只在预算还够一次有意义的尝试（≥ 8s）时才补，最坏 30s 收尾。
+_SYNTH_TOTAL_BUDGET_SECONDS = 30.0
+_SYNTH_MIN_RETRY_SECONDS = 8.0
