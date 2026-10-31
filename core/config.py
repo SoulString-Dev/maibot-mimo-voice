@@ -32,7 +32,7 @@ class PluginSectionConfig(PluginConfigBase):
     __ui_label__ = "基础设置"
 
     enabled: bool = Field(default=True, description="是否启用语音回复")
-    config_version: str = Field(default="0.5.2", description="配置文件版本号（内部使用，无需修改）")
+    config_version: str = Field(default="0.5.3", description="配置文件版本号（内部使用，无需修改）")
 
 
 class GeneralConfig(PluginConfigBase):
@@ -50,7 +50,13 @@ class GeneralConfig(PluginConfigBase):
         default=20.0,
         ge=3.0,
         le=120.0,
-        description="单次语音合成超时（秒）；超时按 delivery.fallback_to_text 处理",
+        description="单次语音合成超时（秒）；auto 模式下作为样本不足时的兜底值，"
+        "fixed 模式下就是固定超时；超时按 delivery.fallback_to_text 处理",
+    )
+    timeout_mode: Literal["auto", "fixed"] = Field(
+        default="auto",
+        description="超时策略：auto = 按最近合成耗时动态调整（样本 ≥10 条后取 p80×1.4，夹在 12–25 秒）；"
+        "fixed = 始终用上面的 timeout，行为与 0.5.2 一致",
     )
 
 
@@ -198,8 +204,9 @@ class MiMoConfig(PluginConfigBase):
         description="仅对 429/5xx/网络错误重试（超时另由 retry_on_timeout 控制）",
     )
     retry_on_timeout: bool = Field(
-        default=True,
-        description="单次合成超过 general.timeout 时换一次请求重来（只重试一次，最坏耗时翻倍）",
+        default=False,
+        description="单次合成超时后是否换一次请求重来（只重试一次，最坏耗时翻倍）；"
+        "默认关：超时的请求大多直接跳到 30 秒以上，重试基本是白等，还会占满单条通道",
     )
     retry_backoff_seconds: float = Field(default=1.5, ge=0.0, le=10.0, description="重试退避基数（秒），按 2 的幂指数增长")
     connect_timeout: float = Field(default=10.0, ge=1.0, le=60.0, description="建立连接的超时（秒），与整体超时分开")

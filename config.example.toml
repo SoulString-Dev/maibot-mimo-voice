@@ -1,5 +1,5 @@
 # ================================================================
-# MiMo TTS 语音回复 配置模板（0.5.2）
+# MiMo TTS 语音回复 配置模板（0.5.3）
 # ================================================================
 #
 # 怎么用：
@@ -10,7 +10,7 @@
 # 自定义音色放哪：
 #   放到插件数据目录的 references/ 下，例如
 #     data/plugins/github.SoulString-Dev.maibot-mimo-voice/references/我的音色.wav
-#   然后 [voice] preset = "custom"、reference_path = "我的音色.wav"（只写文件名）。
+#   然后 [voice] preset = "自定义"、reference_path = "我的音色.wav"（只写文件名）。
 #   目录不存在时插件会自动创建，启动日志里会打印完整路径。
 #
 # 阅读方式：
@@ -23,7 +23,7 @@
 # 总开关：关掉后所有回复都保持文字。
 enabled = true
 # 配置文件版本，内部用来做迁移，不要手改。
-config_version = "0.5.2"
+config_version = "0.5.3"
 
 [mimo]
 # ---- MiMo 接口 ----
@@ -51,9 +51,9 @@ allow_private_base_url = false
 max_concurrent = 1
 # 遇到 429 / 5xx / 网络错误时的重试次数（0–3）。超时不算在内，见下一项。
 retry_attempts = 0
-# 单次合成超过 [general] timeout 时，换一次新请求重来（只补一次）。
-# 实测超时的请求大多直接跳到 30 秒以上，补一次比把超时放宽更划算。
-retry_on_timeout = true
+# 单次合成超时后，是否换一次新请求重来（默认关）。
+# 实测超时的请求大多直接跳到 30 秒以上，补一次大概率还是超时，只会让这条回复再等 20 秒。
+retry_on_timeout = false
 # 重试的退避基数（秒），按 1.5 → 3 → 6 递增。
 retry_backoff_seconds = 1.5
 # 建立连接的超时（秒），与整体的 timeout 分开。
@@ -69,8 +69,9 @@ connect_timeout = 10.0
 # 下拉里只有中文名；旧写法 bingtang / jasmine / litang / custom 仍能读，读进来自动换成中文。
 preset = "理塘王"
 # 仅 preset = "自定义" 时生效：只写文件名即可（例如 我的音色.wav）。
-# 文件放在插件数据目录的 references/ 下；为兼容旧版本，放插件根目录也能读到。
-# 建议 3–10 秒、干净无背景音、单人说话的 24 kHz 单声道 WAV。
+# 文件放在插件数据目录的 references/ 下。
+# 建议 1–5 秒、干净无背景音、单人说话的 WAV（采样率不限）；超长会自动瘦身。
+# 注意是单个文件，不要把多段拼接成一个长文件。
 reference_path = "reference.wav"
 # 朗读风格指令（会作为 user 消息发给模型，留空 = 不发）。
 # 这句直接决定语速和语气：写"语速平稳"会明显变慢、像念稿；下面这句是实测调整过的。
@@ -134,7 +135,12 @@ private_user_ids = []
 # ---- 长度与超时 ----
 # 单条语音最多多少字：超过时按 [trigger] overflow_policy 处理。
 max_text_length = 300
-# 单次合成的超时（秒，建议 10–30）：超时先补一次请求，仍失败就回退文字。
+# 超时模式（下拉）：
+#   auto   按最近的合成耗时自动调整（默认）：取 p80×1.4，限制在 12–25 秒
+#   fixed  固定使用下面的 timeout，行为与 0.5.2 相同
+timeout_mode = "auto"
+# 单次合成的超时（秒，建议 10–30）：fixed 模式按这个值；auto 模式只是冷启动的初值，样本够了会被动态值取代。
+# 超时直接回退文字（不再重发请求）。
 timeout = 20.0
 
 [delivery]

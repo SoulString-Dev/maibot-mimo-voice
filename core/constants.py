@@ -41,13 +41,16 @@ _SOFT_LIMIT_CEILING = 0.97
 
 _SCOPE_TTL_SECONDS = 12 * 3600.0
 _SCOPE_CACHE_MAX_ENTRIES = 5000
-# 内置音色：随插件分发的标准参考音频（由 MiMo 预置音色按同一套升调/裁剪流程生成）。
+# 内置音色：随插件分发的标准参考音频，统一放在插件根目录的 presets/ 下。
 # 键就是配置里显示的中文名，内部不再另设短 id。
+PRESET_DIR_NAME = "presets"
 PRESET_REFERENCE_FILES = {
-    "冰糖": "reference-bingtang.wav",
-    "茉莉": "reference-jasmine.wav",
-    "理塘王": "reference-litang.wav",
+    "冰糖": "presets/reference-bingtang.wav",
+    "茉莉": "presets/reference-jasmine.wav",
+    "理塘王": "presets/reference-litang.wav",
 }
+# 内置音色的文件名集合：用来判断"这条参考是不是随版本分发的"（跳过体检与自动瘦身）。
+PRESET_REFERENCE_NAMES = frozenset(item.rsplit("/", 1)[-1] for item in PRESET_REFERENCE_FILES.values())
 # 配置里只显示中文名；旧写法（含大小写/空格变体）仍然能读，读进来立刻换成中文名。
 PRESET_ALIASES = {
     "冰糖": "冰糖",
@@ -85,3 +88,12 @@ _REFERENCE_WARN_LONGEST_SILENCE_SECONDS = 0.4
 _FFMPEG_BIN = "ffmpeg"
 # MiMo 侧参考音频 Base64 上限约 10MB，留一点余量。
 _REFERENCE_MAX_BYTES = int(9.5 * 1024 * 1024)
+
+# 自适应超时（0.5.3）：先埋点拿到真实耗时，再用 p80 × 1.4 定超时。
+# 样本不足时用 general.timeout（20s）兜底，样本够了才切动态值，避免冷启动就乱定。
+_TIMEOUT_SAMPLE_SIZE = 50
+_TIMEOUT_MIN_SAMPLES = 10
+_TIMEOUT_FACTOR = 1.4
+_TIMEOUT_MIN_SECONDS = 12.0
+_TIMEOUT_MAX_SECONDS = 25.0
+_TIMEOUT_STEP_SECONDS = 0.5

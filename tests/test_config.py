@@ -12,6 +12,8 @@ from __bootstrap import REPO_ROOT, Checker, config_module, load_plugin, make_plu
 
 module = load_plugin()
 cfg = config_module(module)
+constants = sys.modules[f"{module.__name__}.core.constants"]
+
 checker = Checker("配置侧")
 
 # ---------------------------------------------------------------- 默认值
@@ -25,6 +27,7 @@ defaults = {
     "decision_ttl": config.trigger.decision_ttl,
     "max_text_length": config.general.max_text_length,
     "timeout": config.general.timeout,
+    "timeout_mode": config.general.timeout_mode,
     "temperature": config.mimo.temperature,
     "retry_on_timeout": config.mimo.retry_on_timeout,
     "timbre_match": config.delivery.timbre_match,
@@ -42,8 +45,9 @@ expected = {
     "decision_ttl": 10.0,
     "max_text_length": 300,
     "timeout": 20.0,
+    "timeout_mode": "auto",
     "temperature": 0.15,
-    "retry_on_timeout": True,
+    "retry_on_timeout": False,
     "timbre_match": True,
     "trim_tail_silence_ms": 250,
     "tail_pad_ms": 120,
@@ -67,10 +71,13 @@ for raw, want in (
     ("CUSTOM", "自定义"),
 ):
     checker.equal(f"音色别名 {raw!r}", cfg.MiMoVoiceConfig(voice={"preset": raw}).voice.preset, want)
-builtin_files = {path.name for path in REPO_ROOT.glob("reference-*.wav")}
-checker.check("内置音色文件齐全",
+builtin_files = {path.name for path in (REPO_ROOT / "presets").glob("reference-*.wav")}
+checker.check("内置音色文件齐全（presets/）",
               {"reference-bingtang.wav", "reference-jasmine.wav", "reference-litang.wav"} <= builtin_files,
               f"{sorted(builtin_files)}")
+checker.equal("内置音色清单与新布局一致",
+              set(constants.PRESET_REFERENCE_FILES.values()),
+              {"presets/reference-bingtang.wav", "presets/reference-jasmine.wav", "presets/reference-litang.wav"})
 
 # ---------------------------------------------------------------- 地址守卫
 checker.equal("官方地址放行", cfg._api_base_url_problem("https://api.xiaomimimo.com/v1", allow_private=False), "")

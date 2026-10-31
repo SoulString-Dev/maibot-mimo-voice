@@ -16,7 +16,7 @@
 | 内置理塘王 + MiMo 默认女角色参考，`voice.preset` 写中文名切换 | 开箱就能出声；理塘王实测克隆距离中位 3.39 dB，比女声更稳 |
 | 默认 `random_llm` + `probability = 0.15` + 短句门槛 60 字 | 全量太吵；15% 下约每 7–10 条回复出一条，且模型可被点名开口，装好就能试听 |
 | `temperature` 0.15、`style_instruction` 风格指令、朗读前清洗文本 | 表情 / 引号 / 波浪号 / 省略号会让音高漂移 2–4 个半音并带来首尾爆音；清洗后 f0 抖动 σ 从 34.6 Hz 降到 5.5–13.6 Hz |
-| 超时 20 秒、超时换一次请求，仍失败回退文字 | 上游 p95 约 48 秒，不能把回复拖到一分钟 |
+| 超时自动调整（12–25 秒）、超时直接回退文字。| 上游 p95 约 48 秒；实测超时的请求多数直接跳到 30 秒以上，再补一次也是白等 20 秒 |
 | 并发 1 路，满了直接发文字（`skip_when_busy`） | 3 路并发把单路延迟推到 50–96 秒 |
 | 参考音频只认插件目录 / 数据目录内的相对路径 | 防止配置被改成 `/etc/...` 之类的越界读取 |
 | 不做音频缓存，只缓存参考特征与瘦身结果 | LLM 回复几乎不逐字重复；参考是固定输入，值得缓存 |
@@ -65,7 +65,7 @@
 
 配置界面下拉里只有中文名。旧写法 `bingtang` / `jasmine` / `litang` / `custom` 也还能读，读进来自动换成中文名。
 
-三套内置参考都是**合成音色**（不是真人录音），随插件分发。
+三套内置参考都是**合成音色**（不是真人录音），随插件分发，放在 `presets/` 下，加载时按版本清单校验、跳过体检与自动瘦身。
 生成方式：先用 MiMo 预置音色生成原始采样，再跑 `tools/build_reference.sh`（升调 1.12、`atempo` 1.08、裁首尾静音）。
 
 ## 换成自己的声音
@@ -120,7 +120,7 @@ private_mode = "all"
 
 `group_mode` 与 `private_mode` 都不是 `all` 时，插件会记录入站消息的群号 / 对方 QQ 号（`chat.receive.before_process`），出站时按名单判断；两者都是 `all` 时不记录，零额外开销。拿不到对方身份时（映射过期等）一律保持文字，不误放行。
 
-## 配置说明（共 37 项，日常只需动前 12 项）
+## 配置说明（共 38 项，日常只需动前 12 项）
 
 ### 基础
 
@@ -133,9 +133,10 @@ private_mode = "all"
 | `trigger.probability` | `0.15` | `random` / `random_llm` 模式下每条回复转语音的概率。低于 0.1 基本感知不到，太高会显得吵 |
 | `trigger.short_reply_max_chars` | `60` | 随机转语音的字数门槛（0 = 不限制）；模型主动请求不受限 |
 | `general.max_text_length` | `300` | 单条语音最多念多少字，超出按 `overflow_policy` 处理 |
-| `general.timeout` | `20.0` | 单次合成超时（秒），超时不重试 |
+| `general.timeout` | `20.0` | 单次合成超时（秒）。`timeout_mode = auto` 时只是冷启动初值，样本够了会被动态值取代；超时直接回退文字 |
 | `mimo.temperature` | `0.15` | 越低越稳；0.7 以上能听出"换人" |
 | `voice.style_instruction` | 见模板 | 随请求发送的朗读风格指令，留空则不发 |
+| `general.timeout_mode` | `auto` | 超时策略：`auto` 按最近 50 次合成耗时取 p80×1.4、限制在 12–25 秒；`fixed` 固定用 `general.timeout`（与 0.5.2 相同） |
 | `delivery.fallback_to_text` | `true` | 合成失败 / 超时时发文字还是拦截 |
 | `delivery.skip_when_busy` | `true` | 并发路数占满时直接发文字，不排队 |
 | `delivery.timbre_match` | `true` | 音色对齐：按参考音频的频谱补偿每条输出（需要 WAV 参考，默认开） |
@@ -145,13 +146,13 @@ private_mode = "all"
 
 | 配置 | 默认 | 说明 |
 |---|---|---|
-| `plugin.config_version` | `0.5.2` | 配置版本号（内部使用，无需修改） |
+| `plugin.config_version` | `0.5.3` | 配置版本号（内部使用，无需修改） |
 | `mimo.api_base_url` | `https://api.xiaomimimo.com/v1` | 必须是 https 公网地址；写成内网/本机地址会自动回退官方地址并告警 |
 | `mimo.model` | `mimo-v2.5-tts-voiceclone` | 也可用 `mimo-v2.5-tts`（预置音色） |
 | `mimo.audio_format` | `mp3` | `mp3` / `wav`；开了任一音频后处理（音色对齐 / 尾音裁剪 / 补尾音 / 峰值归一）时自动改用 `wav`，此项实际被忽略 |
 | `mimo.max_concurrent` | `1` | 同时合成路数，建议保持 1 |
 | `mimo.retry_attempts` | `0` | 仅对 429 / 5xx / 网络错误重试 |
-| `mimo.retry_on_timeout` | `true` | 单次合成超时后换一次请求重来（只重试一次） |
+| `mimo.retry_on_timeout` | `false` | 单次合成超时后是否换一次请求重来。默认关：超时多半是上游整体变慢，再等 20 秒只会拖长回退 |
 | `mimo.retry_backoff_seconds` | `1.5` | 重试退避基数，按 2 的幂增长 |
 | `mimo.connect_timeout` | `10.0` | 建连超时（秒），与整体超时分开 |
 | `mimo.allow_private_base_url` | `false` | 允许把音频发往内网/本机地址（只有自建代理时才需要） |
@@ -213,13 +214,14 @@ private_mode = "all"
 │   ├── config.py                # 配置模型 + api_base_url 校验
 │   ├── text.py                  # 朗读清洗 / 英文口癖策略
 │   └── audio.py                 # WAV 读写 / 频谱曲线 / 音色对齐矩阵
-├── tests/                       # 101 条断言，不依赖 pytest
+├── tests/                       # 129 条断言，不依赖 pytest
 ├── config.example.toml
 ├── _manifest.json
 ├── assets/icon.svg              # 商店图标
-├── reference-bingtang.wav       # 内置参考（随插件发布）
-├── reference-jasmine.wav
-├── reference-litang.wav
+├── presets/                     # 内置参考（随插件发布，旧根目录布局仍兼容）
+│   ├── reference-bingtang.wav
+│   ├── reference-jasmine.wav
+│   └── reference-litang.wav
 └── test.wav                     # 你自己的参考（仅本机，已被 .gitignore 忽略）
 
 <插件数据目录>/                   # 宿主提供，升级不会覆盖
@@ -243,14 +245,14 @@ private_mode = "all"
 
 **明明抽中了，收到的却是文字？** 合成超时（默认 20 秒）、上游 5xx、返回静音或音频异常都会回退文字，日志里有一行 `语音合成失败（...），回退文字`。
 
-**听起来不像参考音频？** 参考换成 2–5 秒、安静环境、单人、无背景音乐的干声；`voice.auto_prepare_reference`（默认开）会把过长的参考自动切句拼到 3–5 秒并做响度归一，启动日志里对过长的参考也会给出提示。`delivery.timbre_match` 默认开启，能补一部分频谱差，但补不了混响和削顶失真。
+**听起来不像参考音频？** 参考换成 1–5 秒、安静环境、单人、无背景音乐的干声；`voice.auto_prepare_reference`（默认开）会把过长的参考自动切句拼到 3–5 秒并做响度归一，启动日志里对过长的参考也会给出提示。`delivery.timbre_match` 默认开启，能补一部分频谱差，但补不了混响和削顶失真。
 
 ## 已知限制
 
 - QQ 不支持「引用 + 语音」组合，转语音时会去掉引用段。
 - `random_requires_chinese` 只约束随机路径；模型主动请求的语音如果文本里有英文，仍会被逐字母念出来（此时可把 `english_policy` 设为 `strip`，代价是 `token`、`cos` 这类词也会被删）。
 - `strip_tics` 的口癖白名单基于「整词重复辅音 / 元音 + 重复辅音≥3」的启发式，`yyds`、`awsl`、`nb` 这类网络缩写不会被删。
-- 上游 TTS 延迟抖动大（p50 约 5 秒、p95 约 48 秒），超时时间不建议压到 10 秒以下。
+- 上游 TTS 延迟抖动大（p50 约 5 秒、p95 约 48 秒），`auto` 模式的下限是 12 秒，不建议再把 `general.timeout` 压得更低。
 - 单路并发是有意为之：3 路并发会让单路延迟翻十倍。
 
 ## 隐私
@@ -273,6 +275,13 @@ private_mode = "all"
 宿主机没有 `ffmpeg` 时，插件会在加载时退回 `single_file`，不会报错。
 
 ## 更新日志
+
+### 0.5.3
+
+- **自适应超时**（`general.timeout_mode`，默认 `auto`）：按最近 50 次合成的 p80 × 1.4 调整，限制在 12–25 秒；冷启动仍用 `general.timeout`，样本够了才接管。上游变快时更早回退、变慢时少误杀。
+- **耗时埋点**：每条合成都会记录 `语音合成耗时：…`，失败记录 `语音合成失败（类型=…，耗时…）`，方便按版本看真实延迟分布。
+- `mimo.retry_on_timeout` 默认改为 **`false`**：超时多半是上游整体变慢，再补一次请求只会多等 20 秒（旧行为可显式打开）。
+- 内置音色移到 `presets/` 子目录，旧布局仍兼容。
 
 ### 0.5.2
 
@@ -310,7 +319,7 @@ python -c "import tomllib; tomllib.load(open('config.example.toml','rb'))"
 pip install -r requirements-dev.txt
 ruff check .
 mypy plugin.py core   # 需先装 maibot-plugin-sdk，否则基类被当作 Any，会漏掉 self.config 的类型问题
-python tests/run_all.py     # 文本/音频/配置三组共 101 条断言
+python tests/run_all.py     # 文本/音频/配置/超时四组共 129 条断言
 ```
 
 CI（`.github/workflows/ci.yml`）在每次 push / PR 上跑同样三条命令：ruff、mypy、单测。
@@ -319,14 +328,14 @@ CI（`.github/workflows/ci.yml`）在每次 push / PR 上跑同样三条命令�
 部署到运行中的麦麦（示例：NAS 上的容器）：
 
 ```bash
-tar czf /tmp/mv.tgz plugin.py core config.example.toml _manifest.json README.md
+tar czf /tmp/mv.tgz plugin.py core presets config.example.toml _manifest.json README.md
 scp /tmp/mv.tgz user@nas:/tmp/
 ssh user@nas 'cd <插件目录> && tar xzf /tmp/mv.tgz && sudo chown -R 1000:1000 .'
 ```
 
 插件目录里的文件被改动后，麦麦的文件监视会自动重载扩展插件；`plugin.py` 的语法错误会让**所有**扩展插件一起停摆，改完务必先本地 `py_compile`。
 
-仓库里只提交三套内置音色（`reference-bingtang.wav` / `reference-jasmine.wav` / `reference-litang.wav`，白名单放行）；
+仓库里只提交三套内置音色（`presets/` 下的 `reference-bingtang.wav` / `reference-jasmine.wav` / `reference-litang.wav`，白名单放行）；
 你自己的参考音频和 `references/`、`voices/` 都已被 `.gitignore` 排除，不会被误提交。
 
 回滚：`git checkout <上个版本> -- plugin.py` 后重新铺文件即可；配置项只增不减，旧配置一般无需改。

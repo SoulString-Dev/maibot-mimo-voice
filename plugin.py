@@ -26,8 +26,9 @@ import shutil
 import subprocess
 import time
 import wave
+from collections import deque
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, cast
+from typing import Any, Deque, Dict, List, Optional, Tuple, cast
 from urllib.parse import urlsplit
 
 import aiohttp
@@ -36,6 +37,7 @@ from maibot_sdk.types import ErrorPolicy, HookMode, HookOrder
 
 from .core import config as _config
 from .core import text as _text
+from .core import timeout as _timeout
 from .core.audio import (
     _apply_gain_curve,
     _concat_path,
@@ -84,10 +86,12 @@ from .core.constants import (
     _TAIL_KEEP_SECONDS,
     _TIMBRE_FULL_STRENGTH_DB,
     _TIMBRE_MAX_GAIN_DB,
+    _TIMEOUT_SAMPLE_SIZE,
     _TTL_CACHE_MAX_ENTRIES,
     PRESET_ALIASES,
     PRESET_DISPLAY_NAMES,
     PRESET_REFERENCE_FILES,
+    PRESET_REFERENCE_NAMES,
     SUPPORTED_REFERENCE_SUFFIXES,
     VOICE_SEGMENT_TYPE,
 )
@@ -129,6 +133,8 @@ class MiMoVoicePlugin(MaiBotPlugin):
         self._reference_built_suffix: Optional[str] = None
         self._warned: set[str] = set()
         self._synthesis_slots = asyncio.Semaphore(1)
+        # 最近若干次成功合成的耗时（秒），供自适应超时取 p80；热重载/重启后重新积累。
+        self._synth_durations: Deque[float] = deque(maxlen=_TIMEOUT_SAMPLE_SIZE)
 
     # ------------------------------------------------------------------ 生命周期
 
@@ -148,8 +154,8 @@ class MiMoVoicePlugin(MaiBotPlugin):
         strategy = self.config.voice.reference_strategy
         self.ctx.logger.info(
             "MiMo 语音插件已加载：音色=%s, mode=%s, probability=%.2f, 短句上限=%d字, 合成=%s, "
-            "风格指令=%s, 参考策略=%s, 英文=%s, 随机需纯中文=%s, 超时重试=%s, 音色对齐=%s, "
-            "尾部裁剪=%dms, 尾部补静音=%dms, 峰值归一=%s, 群聊放行=%s, 私聊放行=%s",
+            "风格指令=%s, 参考策略=%s, 英文=%s, 随机需纯中文=%s, 超时策略=%s(%.0fs), 超时重试=%s, "
+            "音色对齐=%s, 尾部裁剪=%dms, 尾部补静音=%dms, 峰值归一=%s, 群聊放行=%s, 私聊放行=%s",
             PRESET_DISPLAY_NAMES.get(self.config.voice.preset, self.config.voice.preset),
             self.config.trigger.mode,
             self.config.trigger.probability,
@@ -159,6 +165,8 @@ class MiMoVoicePlugin(MaiBotPlugin):
             strategy,
             self.config.trigger.english_policy,
             "开" if self.config.trigger.random_requires_chinese else "关",
+            str(getattr(self.config.general, "timeout_mode", "auto")),
+            float(self.config.general.timeout),
             "开" if self.config.mimo.retry_on_timeout else "关",
             "开" if self.config.delivery.timbre_match else "关",
             int(self.config.delivery.trim_tail_silence_ms),
@@ -285,11 +293,25 @@ class MiMoVoicePlugin(MaiBotPlugin):
         return fallback or (self._plugin_dir() / default_name).resolve()
 
     def _preset_path(self, preset_file: str) -> Optional[Path]:
-        """内置音色文件：随插件分发（插件目录），也允许在数据目录覆盖。"""
-        for root in self._user_roots():
-            candidate = (root / preset_file).resolve()
-            if candidate.is_file():
-                return candidate
+        """内置音色文件：随插件分发的 ``presets/<name>.wav``，也允许在数据目录覆盖。
+
+        查找顺序：数据目录 → 插件目录，都先按新布局 ``presets/xxx.wav``，
+        再按 0.5.2 及更早的旧布局（插件根目录）兜底，老版本升级不会突然找不到音色。
+        """
+        data_dir = self._data_dir()
+        plugin_dir = self._plugin_dir()
+        legacy_name = preset_file.rsplit("/", 1)[-1]
+        candidates: List[Path] = []
+        for base in (data_dir, plugin_dir):
+            if base is None:
+                continue
+            candidates.append(base / preset_file)
+            if legacy_name != preset_file:
+                candidates.append(base / legacy_name)
+        for candidate in candidates:
+            resolved = candidate.resolve()
+            if resolved.is_file():
+                return resolved
         return None
 
     def _reference_path(self) -> Path:
@@ -509,7 +531,7 @@ class MiMoVoicePlugin(MaiBotPlugin):
         if path.suffix.lower() != ".wav" or _numpy() is None:
             self.ctx.logger.info("参考音频：%s（非 WAV 或缺少 numpy，未做体检）", path.name)
             return
-        if path.name in PRESET_REFERENCE_FILES.values():
+        if path.name in PRESET_REFERENCE_NAMES:
             self.ctx.logger.info("参考音频：%s（内置音色，已随版本校验，跳过体检）", path.name)
             return
         try:
@@ -566,7 +588,7 @@ class MiMoVoicePlugin(MaiBotPlugin):
             return None
         if path.suffix.lower() != ".wav" or _numpy() is None:
             return None
-        if path.name in PRESET_REFERENCE_FILES.values():
+        if path.name in PRESET_REFERENCE_NAMES:
             return None  # 内置音色是随版本校验过的成品，不做二次加工
         output = self._cache_dir() / f"prepared-{self._prepare_signature(path)}.wav"
         if output.is_file() and output.stat().st_size > 0:
@@ -910,26 +932,59 @@ class MiMoVoicePlugin(MaiBotPlugin):
         self._warned.add(key)
         self.ctx.logger.warning(message, *args)
 
-    async def _synthesize_once(self, text: str, timeout: float) -> bytes:
-        """合成一次；超时按 retry_on_timeout 最多再重来一次。
+    def _current_timeout(self) -> float:
+        """这次合成该用的超时：``auto`` 按最近耗时算，``fixed`` 用配置值。"""
+        mode = str(getattr(self.config.general, "timeout_mode", "auto"))
+        return _timeout.effective_timeout(
+            self._synth_durations,
+            config_timeout=float(self.config.general.timeout),
+            mode=mode,
+        )
 
-        实测超时的请求大多直接跳到 30 秒以上（不是刚好卡在边界），
-        所以"再给它一次机会"比"把超时放宽到 30/40 秒"更划算：
-        失败率从约 18% 降到 3–4%，正常时段体感不变。
+    async def _synthesize_once(self, text: str, timeout: float, attempt: int = 1) -> bytes:
+        """合成一次，并给每次请求埋点。
+
+        成功记「语音合成耗时：3.42s（timeout 20.0s，第 1 次）」，失败记
+        「语音合成失败（类型=timeout/429/5xx/network/audio，耗时…，第 N 次）」。
+
+        超时的请求大多直接跳到 30 秒以上（不是刚好卡在边界），所以"再给它一次机会"
+        只在 ``retry_on_timeout`` 显式打开时才做；默认关，避免一次超时占满 40 秒单路。
         """
         retries = 1 if self.config.mimo.retry_on_timeout else 0
         while True:
+            started = time.monotonic()
             try:
-                return await asyncio.wait_for(self._synthesize(text), timeout=timeout)
+                payload = await asyncio.wait_for(self._synthesize(text), timeout=timeout)
             except asyncio.TimeoutError as exc:
+                elapsed = time.monotonic() - started
+                self.ctx.logger.warning(
+                    "语音合成失败（类型=timeout，耗时 %.2fs，timeout %.1fs，第 %d 次）",
+                    elapsed,
+                    timeout,
+                    attempt,
+                )
                 if retries > 0:
                     retries -= 1
-                    self.ctx.logger.warning("语音合成超时（%.0fs），换一次请求重来", timeout)
                     continue
                 raise TimeoutError(f"语音合成超时（{timeout:.0f}s）") from exc
+            except Exception as exc:
+                elapsed = time.monotonic() - started
+                self.ctx.logger.warning(
+                    "语音合成失败（类型=%s，耗时 %.2fs，timeout %.1fs，第 %d 次）：%s",
+                    _timeout.classify_failure(exc),
+                    elapsed,
+                    timeout,
+                    attempt,
+                    exc,
+                )
+                raise
+            elapsed = time.monotonic() - started
+            self._synth_durations.append(elapsed)
+            self.ctx.logger.info("语音合成耗时：%.2fs（timeout %.1fs，第 %d 次）", elapsed, timeout, attempt)
+            return payload
 
     async def _synthesize_guarded(self, text: str) -> bytes:
-        timeout = float(self.config.general.timeout)
+        timeout = self._current_timeout()
         attempts = max(0, int(self.config.mimo.retry_attempts))
         backoff = max(0.0, float(self.config.mimo.retry_backoff_seconds))
         last_error: Optional[BaseException] = None
@@ -940,7 +995,7 @@ class MiMoVoicePlugin(MaiBotPlugin):
             await self._synthesis_slots.acquire()
             retryable: Optional[BaseException] = None
             try:
-                return await self._synthesize_once(text, timeout)
+                return await self._synthesize_once(text, timeout, attempt + 1)
             except (_RetryableSynthesisError, aiohttp.ClientError) as exc:
                 last_error = exc
                 if attempt < attempts:
