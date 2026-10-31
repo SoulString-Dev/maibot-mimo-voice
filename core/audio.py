@@ -266,15 +266,23 @@ def prepare_reference(
         room = budget - used
         if room <= 0:
             break
-        take = min(piece.size, room)
-        pieces.append(piece[:take])
+        if piece.size > room:
+            # 放不下的句子直接跳过：剪半句会把这个截断的语调带进参考
+            continue
+        pieces.append(piece)
         picked += 1
-        used += take
+        used += piece.size
         if used >= int(target_seconds * rate):
             break
         if gap.size and used + gap.size <= budget:
             pieces.append(gap)
             used += gap.size
+    if picked <= 1:
+        # 只凑得出一句时，选最长且不超过上限的那句，比"两句 + 截断"更干净
+        fitting = [seg for seg in segments if (seg[1] - seg[0]) <= budget]
+        best = max(fitting, key=lambda seg: seg[1] - seg[0]) if fitting else segments[0]
+        pieces = [pcm[best[0]: min(best[1], best[0] + budget)]]
+        picked = 1
     out = np.concatenate(pieces)[:budget] if pieces else pcm
     peak = float(np.max(np.abs(out))) if len(out) else 0.0
     if peak > 1e-6:

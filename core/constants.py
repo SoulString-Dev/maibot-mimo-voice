@@ -48,6 +48,7 @@ PRESET_REFERENCE_FILES = {
     "冰糖": "presets/reference-bingtang.wav",
     "茉莉": "presets/reference-jasmine.wav",
     "理塘王": "presets/reference-litang.wav",
+    "曼波": "presets/reference-manbo.wav",
 }
 # 内置音色的文件名集合：用来判断"这条参考是不是随版本分发的"（跳过体检与自动瘦身）。
 PRESET_REFERENCE_NAMES = frozenset(item.rsplit("/", 1)[-1] for item in PRESET_REFERENCE_FILES.values())
@@ -59,6 +60,8 @@ PRESET_ALIASES = {
     "jasmine": "茉莉",
     "理塘王": "理塘王",
     "litang": "理塘王",
+    "曼波": "曼波",
+    "manbo": "曼波",
     "自定义": "自定义",
     "custom": "自定义",
 }
@@ -66,6 +69,7 @@ PRESET_DISPLAY_NAMES = {
     "冰糖": "冰糖",
     "茉莉": "茉莉",
     "理塘王": "理塘王",
+    "曼波": "曼波",
     "自定义": "自定义",
 }
 

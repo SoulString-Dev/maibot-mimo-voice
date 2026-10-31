@@ -1,6 +1,6 @@
 # maibot-mimo-voice（MiMo TTS 语音回复）
 
-把麦麦（MaiBot）的**纯文本回复**按策略换成 MiMo 语音条。开箱自带「理塘王」与 MiMo 默认女角色音色，也可以换成自己的参考音频。
+把麦麦（MaiBot）的**纯文本回复**按策略换成 MiMo 语音条。开箱自带「理塘王」「曼波」与 MiMo 默认女角色音色，也可以换成自己的参考音频。
 
 思路参考 [Ling-LA/ling-tts-bot](https://github.com/Ling-LA/ling-tts-bot)（MIT），本仓库在触发方式、文本清洗与工程细节上做了重写，差异见下表。
 
@@ -28,7 +28,7 @@
 1. 打开麦麦 WebUI 的插件市场，搜「MiMo TTS」部署。
 2. **先去 MiMo 开放平台拿一个 API Key**（没弄过就照着下一节一步步走）。
 3. 回到麦麦的插件配置页，把 Key 填进 `mimo.api_key`，保存即热重载。`config.toml` 由运行时按插件声明的配置模型自动生成，**不需要**手动复制 `config.example.toml`；想先弄清每一项的含义，可以对着它读注释。
-4. 音色是内置的 `理塘王`（低沉、带口音），不需要自己准备参考音频；想要女声就切 `冰糖` / `茉莉`，想用自己的声音就把音频放进 `references/` 并把 `voice.preset` 改成 `自定义`。下拉里只有中文名。
+4. 音色默认是内置的 `理塘王`（低沉、带口音），不需要自己准备参考音频；想要年轻可爱的女声切 `曼波`，想要 MiMo 官方女声切 `冰糖` / `茉莉`；想用自己的声音就把音频放进 `references/` 并把 `voice.preset` 改成 `自定义`。下拉里只有中文名。
 5. 升级新版本后重启核心，插件目录里的 `config.toml` 与数据目录的 `references/` 都会保留。
 
 ### 第一次用：注册并获取 API Key
@@ -59,13 +59,14 @@
 | `voice.preset` | 音色 | 说明 |
 |---|---|---|
 | `理塘王` | 理塘王 | 低沉、带口音的男声，约 4.8 秒参考（两句拼接）。实测克隆输出与参考的频谱距离中位 3.39 dB，比女声更稳 |
+| `曼波` | 曼波 | 年轻、偏可爱的女声，约 4.2 秒参考（单句）。素材是 AI 合成音，用二创别称命名，与角色本人无关 |
 | `冰糖` | MiMo 默认女角色 · 冰糖 | MiMo 官方预置女声，偏亮，约 2.9 秒参考 |
 | `茉莉` | MiMo 默认女角色 · 茉莉 | 同系列女声，比冰糖略低、更柔和，约 3.2 秒参考 |
 | `自定义` | 自定义 | 用 `voice.reference_path` 指向你自己的参考音频（放插件数据目录的 `references/` 下） |
 
-配置界面下拉里只有中文名。旧写法 `bingtang` / `jasmine` / `litang` / `custom` 也还能读，读进来自动换成中文名。
+配置界面下拉里只有中文名。旧写法 `manbo` / `bingtang` / `jasmine` / `litang` / `custom` 也还能读，读进来自动换成中文名。
 
-三套内置参考都是**合成音色**（不是真人录音），随插件分发，放在 `presets/` 下，加载时按版本清单校验、跳过体检与自动瘦身。
+四套内置参考都是**合成音色**（不是真人录音），随插件分发，放在 `presets/` 下，加载时按版本清单校验、跳过体检与自动瘦身。
 生成方式：先用 MiMo 预置音色生成原始采样，再跑 `tools/build_reference.sh`（升调 1.12、`atempo` 1.08、裁首尾静音）。
 
 ## 换成自己的声音
@@ -128,7 +129,7 @@ private_mode = "all"
 |---|---|---|
 | `plugin.enabled` | `true` | 总开关 |
 | `mimo.api_key` | 空 | MiMo 官方 API Key |
-| `voice.preset` | `理塘王` | 音色：`理塘王` / `冰糖` / `茉莉` / `自定义`（`冰糖` / `茉莉` 是 MiMo 官方预置女声；旧写法 `bingtang` / `jasmine` / `litang` / `custom` 会自动换成中文名） |
+| `voice.preset` | `理塘王` | 音色：`理塘王` / `曼波` / `冰糖` / `茉莉` / `自定义`（`冰糖` / `茉莉` 是 MiMo 官方预置女声；旧写法 `manbo` / `bingtang` / `jasmine` / `litang` / `custom` 会自动换成中文名） |
 | `trigger.mode` | `random_llm` | 见「触发方式」 |
 | `trigger.probability` | `0.15` | `random` / `random_llm` 模式下每条回复转语音的概率。低于 0.1 基本感知不到，太高会显得吵 |
 | `trigger.short_reply_max_chars` | `60` | 随机转语音的字数门槛（0 = 不限制）；模型主动请求不受限 |
@@ -214,7 +215,7 @@ private_mode = "all"
 │   ├── config.py                # 配置模型 + api_base_url 校验
 │   ├── text.py                  # 朗读清洗 / 英文口癖策略
 │   └── audio.py                 # WAV 读写 / 频谱曲线 / 音色对齐矩阵
-├── tests/                       # 129 条断言，不依赖 pytest
+├── tests/                       # 142 条断言，不依赖 pytest
 ├── config.example.toml
 ├── _manifest.json
 ├── assets/icon.svg              # 商店图标
@@ -319,7 +320,7 @@ python -c "import tomllib; tomllib.load(open('config.example.toml','rb'))"
 pip install -r requirements-dev.txt
 ruff check .
 mypy plugin.py core   # 需先装 maibot-plugin-sdk，否则基类被当作 Any，会漏掉 self.config 的类型问题
-python tests/run_all.py     # 文本/音频/配置/超时四组共 129 条断言
+python tests/run_all.py     # 文本/音频/配置/超时四组共 142 条断言
 ```
 
 CI（`.github/workflows/ci.yml`）在每次 push / PR 上跑同样三条命令：ruff、mypy、单测。
@@ -335,7 +336,7 @@ ssh user@nas 'cd <插件目录> && tar xzf /tmp/mv.tgz && sudo chown -R 1000:100
 
 插件目录里的文件被改动后，麦麦的文件监视会自动重载扩展插件；`plugin.py` 的语法错误会让**所有**扩展插件一起停摆，改完务必先本地 `py_compile`。
 
-仓库里只提交三套内置音色（`presets/` 下的 `reference-bingtang.wav` / `reference-jasmine.wav` / `reference-litang.wav`，白名单放行）；
+仓库里只提交四套内置音色（`presets/` 下的 `reference-bingtang.wav` / `reference-jasmine.wav` / `reference-litang.wav` / `reference-manbo.wav`，白名单放行）；
 你自己的参考音频和 `references/`、`voices/` 都已被 `.gitignore` 排除，不会被误提交。
 
 回滚：`git checkout <上个版本> -- plugin.py` 后重新铺文件即可；配置项只增不减，旧配置一般无需改。

@@ -216,6 +216,12 @@ tail_pcm = prepared_pcm[-int(utils_rate * 0.02) :]
 tail_rms = float(np.sqrt(np.mean(np.square(tail_pcm))))
 checker.check("瘦身后无结尾静音", tail_rms > 0.01, f"{tail_rms:.3f}")
 
+# 参考瘦身不剪半句：2.5s + 4.2s 两句放不进 5s 上限时，只用整句（取最长的 4.2s）
+straddle = join(speech_like(2.5), silence(0.5), speech_like(4.2))
+prepared2, meta2 = module.prepare_reference(*parse(straddle), target_seconds=3.7, max_seconds=5.0)
+checker.check("放不下时只取整句", abs(meta2["duration"] - 4.2) < 0.06, f"{meta2['duration']:.2f}s")
+checker.equal("整句版段数为 1", meta2["segments"], 1)
+
 # 软限幅：超过天花板的峰值被 tanh 压回，正常音量不动
 loud = (np.sin(2 * math.pi * 220.0 * np.arange(utils_rate) / utils_rate) * 2.0).astype(np.float32)
 limited = module.soft_limit(loud, 0.97)
