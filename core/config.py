@@ -136,10 +136,10 @@ class VoiceConfig(PluginConfigBase):
 
     __ui_label__ = "音色"
 
-    preset: Literal["理塘王", "曼波", "冰糖", "茉莉", "自定义"] = Field(
+    preset: Literal["理塘王", "可爱少女", "冰糖", "茉莉", "自定义"] = Field(
         default="理塘王",
-        description="音色：理塘王（低沉、口音重）、曼波（年轻、偏可爱）、冰糖（偏亮、偏年轻）、茉莉（偏低、更柔和）、"
-        "自定义（用 reference_path 指定的文件）；配置文件里写旧写法 manbo / bingtang / jasmine / litang / custom 也能读，会自动换成对应的中文名",
+        description="音色：理塘王（低沉、口音重）、可爱少女（年轻、明亮、偏可爱）、冰糖（偏亮、偏年轻）、茉莉（偏低、更柔和）、"
+        "自定义（用 reference_path 指定的文件）；配置文件里写旧写法 keai / cute / bingtang / jasmine / litang / custom 也能读，会自动换成对应的中文名",
     )
     reference_path: str = Field(
         default="reference.wav",

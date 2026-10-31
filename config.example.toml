@@ -64,11 +64,11 @@ connect_timeout = 10.0
 # ---- 音色 ----
 # 用哪个音色（下拉）：
 #   理塘王  内置理塘王：低沉、带口音
-#   曼波    内置曼波：年轻、偏可爱（AI 合成音，二创角色名，非本人）
+#   可爱少女 内置可爱少女：年轻、明亮、偏可爱
 #   冰糖    内置冰糖：偏亮、偏年轻，MiMo 默认女角色
 #   茉莉    内置茉莉：略低、更柔和
 #   自定义  用你自己提供的参考音频，配下面的 reference_path
-# 下拉里只有中文名；旧写法 manbo / bingtang / jasmine / litang / custom 仍能读，读进来自动换成中文。
+# 下拉里只有中文名；旧写法 keai / cute / bingtang / jasmine / litang / custom 仍能读，读进来自动换成中文。
 preset = "理塘王"
 # 仅 preset = "自定义" 时生效：只写文件名即可（例如 我的音色.wav）。
 # 文件放在插件数据目录的 references/ 下。

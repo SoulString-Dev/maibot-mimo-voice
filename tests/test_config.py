@@ -68,20 +68,20 @@ for raw, want in (
     ("bingtang", "冰糖"),
     ("jasmine", "茉莉"),
     (" Litang ", "理塘王"),
-    ("曼波", "曼波"),
-    ("manbo", "曼波"),
-    (" MANBO ", "曼波"),
+    ("可爱少女", "可爱少女"),
+    ("keai", "可爱少女"),
+    (" CUTE ", "可爱少女"),
     ("CUSTOM", "自定义"),
 ):
     checker.equal(f"音色别名 {raw!r}", cfg.MiMoVoiceConfig(voice={"preset": raw}).voice.preset, want)
 builtin_files = {path.name for path in (REPO_ROOT / "presets").glob("reference-*.wav")}
 checker.check("内置音色文件齐全（presets/）",
-              {"reference-bingtang.wav", "reference-jasmine.wav", "reference-litang.wav", "reference-manbo.wav"} <= builtin_files,
+              {"reference-bingtang.wav", "reference-jasmine.wav", "reference-litang.wav", "reference-keai.wav"} <= builtin_files,
               f"{sorted(builtin_files)}")
 checker.equal("内置音色清单与新布局一致",
               set(constants.PRESET_REFERENCE_FILES.values()),
               {"presets/reference-bingtang.wav", "presets/reference-jasmine.wav",
-     "presets/reference-litang.wav", "presets/reference-manbo.wav"})
+     "presets/reference-litang.wav", "presets/reference-keai.wav"})
 
 # ---------------------------------------------------------------- 地址守卫
 checker.equal("官方地址放行", cfg._api_base_url_problem("https://api.xiaomimimo.com/v1", allow_private=False), "")
