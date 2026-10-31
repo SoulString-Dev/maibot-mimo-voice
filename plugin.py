@@ -948,7 +948,7 @@ class MiMoVoicePlugin(MaiBotPlugin):
         「语音合成失败（类型=timeout/429/5xx/network/audio/other，耗时…，第 N 次）」。
 
         超时后是否补一次新请求，由 ``core.timeout.retry_timeout`` 决定：这条语音
-        总共最多占用单路 ``_SYNTH_TOTAL_BUDGET_SECONDS``（30 秒），剩余预算不够
+        总共最多占用单路 ``_SYNTH_TOTAL_BUDGET_SECONDS``（40 秒），剩余预算不够
         一次有意义的尝试就直接回退。补的价值是换一条新连接、可能落到健康节点，
         和"把超时放宽"不是一回事；但 25s 再补 25s 会顶到 50s 并堵住唯一的并发通道。
         """

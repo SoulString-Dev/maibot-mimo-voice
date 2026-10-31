@@ -14,8 +14,8 @@ README 只保留最新一版的要点。
 
 ### 修改
 
-- 超时后的补一次请求改为**预算制**（`core/timeout.py::retry_timeout`）：单条语音总共最多占用单路 `_SYNTH_TOTAL_BUDGET_SECONDS` = 30 秒；剩余预算不足 `_SYNTH_MIN_RETRY_SECONDS` = 8 秒就不补，补的那次超时取 `min(原超时, 剩余预算)`。
-  依据：超时的请求多数直接跳到 30 秒以上，"再给一次机会"的价值在于换一条新连接、可能落到健康节点，而不是等得更久；但 0.5.2 的 20 s + 20 s 会在 `max_concurrent = 1` 下堵住整条通道。实测 0.5.2 / custom 段超时补一次后约一半能救回，预算制保留这部分收益，最坏耗时从 40 秒降到 30 秒。`mimo.retry_on_timeout = false` 可完全关掉。
+- 超时后的补一次请求改为**预算制**（`core/timeout.py::retry_timeout`）：单条语音总共最多占用单路 `_SYNTH_TOTAL_BUDGET_SECONDS` = 40 秒（与 0.5.2 的最坏耗时持平）；补的那次超时取 `min(原超时, 剩余预算)`，剩余预算不足 `_SYNTH_MIN_RETRY_SECONDS` = 8 秒才放弃。
+  依据：超时的请求多数直接跳到 30 秒以上，"再给一次机会"的价值在于换一条新连接、可能落到健康节点，而不是等得更久。自适应把上限压到 25 秒后，补的那次通常只分到 15–28 秒；40 秒总预算既保留 0.5.2 约一半的救回率，又让"上游整体变慢"有了硬边界。`mimo.retry_on_timeout = false` 可完全关掉。
 - 内置音色移到 `presets/` 子目录（`presets/reference-{bingtang,jasmine,litang}.wav`），为后续新增内置音色留位置；旧的根目录布局仍会兜底读取。
 - 配置项 `config_version` 同步 0.5.3。
 

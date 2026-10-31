@@ -205,7 +205,7 @@ class MiMoConfig(PluginConfigBase):
     )
     retry_on_timeout: bool = Field(
         default=True,
-        description="单次合成超时后，若这条语音的总预算（约 30 秒）还够一次有意义的尝试，就换一条新请求重来"
+        description="单次合成超时后，若这条语音的总预算（约 40 秒）还够一次有意义的尝试，就换一条新请求重来"
         "（换连接可能落到健康节点；预算不足直接回退文字）。关掉即完全不做超时重试",
     )
     retry_backoff_seconds: float = Field(default=1.5, ge=0.0, le=10.0, description="重试退避基数（秒），按 2 的幂指数增长")

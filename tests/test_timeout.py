@@ -59,12 +59,14 @@ checker.equal(
 )
 
 # ---------------------------------------------------------------- 超时后补一次
-checker.equal("12s 超时后还能补（预算 30s）", timeout.retry_timeout(12.0, 12.0), 12.0)
-checker.equal("20s 超时后剩余 10s，按剩余算", timeout.retry_timeout(20.0, 20.0), 10.0)
-checker.equal("25s 超时后剩余 5s，不补", timeout.retry_timeout(25.0, 25.0), None)
-checker.equal("已用满预算则不补", timeout.retry_timeout(30.0, 12.0), None)
-checker.equal("超时比预算还长则不补", timeout.retry_timeout(31.0, 25.0), None)
+checker.equal("12s 超时后补满（预算 40s）", timeout.retry_timeout(12.0, 12.0), 12.0)
+checker.equal("20s 超时后补 20s", timeout.retry_timeout(20.0, 20.0), 20.0)
+checker.equal("25s 超时后补剩余的 15s", timeout.retry_timeout(25.0, 25.0), 15.0)
+checker.equal("剩余正好 8s 仍补", timeout.retry_timeout(32.0, 25.0), 8.0)
+checker.equal("剩余不足 8s 不补", timeout.retry_timeout(33.0, 25.0), None)
+checker.equal("已用满预算则不补", timeout.retry_timeout(40.0, 12.0), None)
 checker.equal("补的那次不会长于原超时", timeout.retry_timeout(5.0, 12.0), 12.0)
+checker.equal("自定义预算生效", timeout.retry_timeout(20.0, 20.0, budget=30.0), 10.0)
 
 # ---------------------------------------------------------------- 失败归类
 checker.equal("超时", timeout.classify_failure(TimeoutError("语音合成超时（20s）")), "timeout")
