@@ -105,6 +105,23 @@ class _SynthesisBusy(RuntimeError):
     """并发已满，按 delivery.skip_when_busy 直接回退文字。"""
 
 
+def _payload_seconds(audio: bytes) -> Optional[float]:
+    """WAV 载荷的真实时长（只读头，不解样本）；其它格式返回 None。
+
+    只用于日志：``audio_format`` 默认是 wav，后处理也要求 wav，所以线上几乎总能拿到值；
+    mp3 等格式没有解码器可用，返回 None 让日志写「音频 未知」。
+    """
+    try:
+        with wave.open(io.BytesIO(audio), "rb") as handle:
+            frames = handle.getnframes()
+            rate = handle.getframerate()
+    except (wave.Error, EOFError):
+        return None
+    if rate <= 0 or frames <= 0:
+        return None
+    return frames / float(rate)
+
+
 class MiMoVoicePlugin(MaiBotPlugin):
     """把纯文本回复替换为 MiMo 语音条。"""
 
@@ -944,8 +961,10 @@ class MiMoVoicePlugin(MaiBotPlugin):
     async def _synthesize_once(self, text: str, timeout: float, attempt: int = 1) -> bytes:
         """合成一次，并给每次请求埋点。
 
-        成功记「语音合成耗时：3.42s（timeout 20.0s，第 1 次）」，失败记
-        「语音合成失败（类型=timeout/429/5xx/network/audio/other，耗时…，第 N 次）」。
+        成功记「语音合成耗时：3.42s（timeout 20.0s，第 1 次，12 字，音频 3.33s）」，失败记
+        「语音合成失败（类型=timeout/429/5xx/network/audio/other，耗时…，timeout …，第 N 次，M 字）：…」。
+        字数与音频时长是 0.5.4 补的：0.5.3 复盘时发现超时可能和文本长度有关，但成功行
+        只有耗时，配不出「多少字 → 多长时间」，只能拿相邻事件硬对，样本对不齐。
 
         超时后是否补一次新请求，由 ``core.timeout.retry_timeout`` 决定：这条语音
         总共最多占用单路 ``_SYNTH_TOTAL_BUDGET_SECONDS``（40 秒），剩余预算不够
@@ -953,6 +972,7 @@ class MiMoVoicePlugin(MaiBotPlugin):
         和"把超时放宽"不是一回事；但 25s 再补 25s 会顶到 50s 并堵住唯一的并发通道。
         """
         retries = 1 if self.config.mimo.retry_on_timeout else 0
+        chars = len(text)
         started_total = time.monotonic()
         round_no = max(1, attempt)
         while True:
@@ -962,10 +982,11 @@ class MiMoVoicePlugin(MaiBotPlugin):
             except asyncio.TimeoutError as exc:
                 elapsed = time.monotonic() - started
                 self.ctx.logger.warning(
-                    "语音合成失败（类型=timeout，耗时 %.2fs，timeout %.1fs，第 %d 次）",
+                    "语音合成失败（类型=timeout，耗时 %.2fs，timeout %.1fs，第 %d 次，%d 字）",
                     elapsed,
                     timeout,
                     round_no,
+                    chars,
                 )
                 next_timeout = None
                 if retries > 0:
@@ -981,17 +1002,27 @@ class MiMoVoicePlugin(MaiBotPlugin):
             except Exception as exc:
                 elapsed = time.monotonic() - started
                 self.ctx.logger.warning(
-                    "语音合成失败（类型=%s，耗时 %.2fs，timeout %.1fs，第 %d 次）：%s",
+                    "语音合成失败（类型=%s，耗时 %.2fs，timeout %.1fs，第 %d 次，%d 字）：%s",
                     _timeout.classify_failure(exc),
                     elapsed,
                     timeout,
                     round_no,
+                    chars,
                     exc,
                 )
                 raise
             elapsed = time.monotonic() - started
             self._synth_durations.append(elapsed)
-            self.ctx.logger.info("语音合成耗时：%.2fs（timeout %.1fs，第 %d 次）", elapsed, timeout, round_no)
+            seconds = _payload_seconds(payload)
+            audio_text = f"{seconds:.2f}s" if seconds is not None else "未知"
+            self.ctx.logger.info(
+                "语音合成耗时：%.2fs（timeout %.1fs，第 %d 次，%d 字，音频 %s）",
+                elapsed,
+                timeout,
+                round_no,
+                chars,
+                audio_text,
+            )
             return payload
 
     async def _synthesize_guarded(self, text: str) -> bytes:

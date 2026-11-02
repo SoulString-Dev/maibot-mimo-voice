@@ -29,13 +29,13 @@ checker.equal("样本不足回退配置值", timeout.effective_timeout([1.0] * 9
 checker.equal("fixed 模式恒为配置值", timeout.effective_timeout([9.0] * 20, config_timeout=18.0, mode="fixed"), 18.0)
 checker.equal(
     "样本足够取 p80×1.4",
-    timeout.effective_timeout([10.0] * 10, config_timeout=20.0),
-    14.0,
+    timeout.effective_timeout([11.0] * 10, config_timeout=20.0),
+    15.5,
 )
 checker.equal(
-    "低于下限时夹到 12s",
+    "低于下限时夹到 15s",
     timeout.effective_timeout([1.0] * 10, config_timeout=20.0),
-    12.0,
+    15.0,
 )
 checker.equal(
     "高于上限时夹到 25s",
@@ -45,7 +45,7 @@ checker.equal(
 checker.equal(
     "向上取整到 0.5s",
     timeout.effective_timeout([3.33] * 10, config_timeout=20.0),
-    12.0,  # 3.33×1.4=4.66 → 夹到下限 12
+    15.0,  # 3.33×1.4=4.66 → 夹到下限 15
 )
 checker.equal(
     "取整后不越上限",
@@ -54,8 +54,8 @@ checker.equal(
 )
 checker.equal(
     "取整到 0.5s 粒度",
-    timeout.effective_timeout([9.1] * 10, config_timeout=20.0),
-    13.0,  # 9.1×1.4=12.74 → 13.0
+    timeout.effective_timeout([11.0] * 10, config_timeout=20.0),
+    15.5,  # 11×1.4=15.4 → 15.5
 )
 
 # ---------------------------------------------------------------- 超时后补一次
@@ -88,7 +88,7 @@ timeout_mode_before = plugin._current_timeout()
 checker.equal("插件冷启动用配置值", timeout_mode_before, float(config.general.timeout))
 plugin._synth_durations.extend([2.0, 2.5, 3.0, 3.0, 3.5, 4.0, 4.0, 4.5, 5.0, 6.0])
 auto_value = plugin._current_timeout()
-checker.check("插件样本足够后切换动态值", 12.0 <= auto_value <= 25.0, f"{auto_value}")
+checker.check("插件样本足够后切换动态值", 15.0 <= auto_value <= 25.0, f"{auto_value}")
 checker.check("动态值不等于配置值", auto_value != float(config.general.timeout), f"{auto_value}")
 
 fixed_config = module.MiMoVoiceConfig(general={"timeout_mode": "fixed", "timeout": 18.0})

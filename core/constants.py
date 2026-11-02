@@ -96,10 +96,12 @@ _REFERENCE_MAX_BYTES = int(9.5 * 1024 * 1024)
 
 # 自适应超时（0.5.3）：先埋点拿到真实耗时，再用 p80 × 1.4 定超时。
 # 样本不足时用 general.timeout（20s）兜底，样本够了才切动态值，避免冷启动就乱定。
+# 下限在 0.5.4 从 12s 抬到 15s：线上 68 次成功里 33 次落在 12s 下限、成功请求 p95 是
+# 11.16s，13 次超时全部发生在 12s 档——下限贴着 p95，等于把正常的长尾当故障。
 _TIMEOUT_SAMPLE_SIZE = 50
 _TIMEOUT_MIN_SAMPLES = 10
 _TIMEOUT_FACTOR = 1.4
-_TIMEOUT_MIN_SECONDS = 12.0
+_TIMEOUT_MIN_SECONDS = 15.0
 _TIMEOUT_MAX_SECONDS = 25.0
 _TIMEOUT_STEP_SECONDS = 0.5
 # 超时后补一次新请求的总时长预算：单条语音最多占用单路这么久。

@@ -32,7 +32,7 @@ class PluginSectionConfig(PluginConfigBase):
     __ui_label__ = "基础设置"
 
     enabled: bool = Field(default=True, description="是否启用语音回复")
-    config_version: str = Field(default="0.5.3", description="配置文件版本号（内部使用，无需修改）")
+    config_version: str = Field(default="0.5.4", description="配置文件版本号（内部使用，无需修改）")
 
 
 class GeneralConfig(PluginConfigBase):
@@ -55,7 +55,7 @@ class GeneralConfig(PluginConfigBase):
     )
     timeout_mode: Literal["auto", "fixed"] = Field(
         default="auto",
-        description="超时策略：auto = 按最近合成耗时动态调整（样本 ≥10 条后取 p80×1.4，夹在 12–25 秒）；"
+        description="超时策略：auto = 按最近合成耗时动态调整（样本 ≥10 条后取 p80×1.4，夹在 15–25 秒）；"
         "fixed = 始终用上面的 timeout，行为与 0.5.2 一致",
     )
 
