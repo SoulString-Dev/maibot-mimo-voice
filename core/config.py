@@ -102,7 +102,41 @@ class TriggerConfig(PluginConfigBase):
     random_requires_chinese: bool = Field(
         default=True,
         description="随机触发时，清洗后仍含英文字母的回复改为发文字（避免把 token/LLM 念成字母）；"
-        "模型主动要语音、llm_trigger、voice_only 不受此限制",
+        "模型主动要语音、llm_trigger、voice_only 不受此限制；点名那一次也不受限制",
+    )
+    mention_priority: bool = Field(
+        default=False,
+        description="被 @ 或点名后提高这一次回复的语音概率（默认关）；只对下一次出站回复生效，"
+        "超过 mention_ttl_seconds 自动作废",
+    )
+    mention_probability: float = Field(
+        default=0.6,
+        ge=0.0,
+        le=1.0,
+        description="点名那一次的语音概率，与 trigger.probability 取较大值；0.6 表示仍有三成多时候回文字",
+    )
+    mention_ttl_seconds: float = Field(
+        default=90.0,
+        ge=0.0,
+        le=3600.0,
+        description="点名优先的有效期（秒）：下一次回复用掉即清，没用到就到期作废",
+    )
+    emotion_weighting: bool = Field(
+        default=False,
+        description="按回复文本的情绪标记（感叹号、连续问号、波浪号、省略号、叠字、拟声词、emoji）"
+        "给抽签概率加分（默认关）",
+    )
+    emotion_step: float = Field(
+        default=0.04,
+        ge=0.0,
+        le=0.2,
+        description="每个情绪标记加多少抽签概率，最多计到 emotion_cap",
+    )
+    emotion_cap: float = Field(
+        default=0.2,
+        ge=0.0,
+        le=1.0,
+        description="情绪加权最多加多少概率：0.15 的基准最多抬到 0.35",
     )
 
 

@@ -38,6 +38,7 @@ from maibot_sdk.types import ErrorPolicy, HookMode, HookOrder
 from .core import config as _config
 from .core import text as _text
 from .core import timeout as _timeout
+from .core import trigger as _trigger
 from .core.audio import (
     _apply_gain_curve,
     _concat_path,
@@ -86,6 +87,7 @@ from .core.constants import (
     _TAIL_KEEP_SECONDS,
     _TIMBRE_FULL_STRENGTH_DB,
     _TIMBRE_MAX_GAIN_DB,
+    _TIMEOUT_RETRY_DELAY_SECONDS,
     _TIMEOUT_SAMPLE_SIZE,
     _TTL_CACHE_MAX_ENTRIES,
     PRESET_ALIASES,
@@ -152,6 +154,8 @@ class MiMoVoicePlugin(MaiBotPlugin):
         self._synthesis_slots = asyncio.Semaphore(1)
         # 最近若干次成功合成的耗时（秒），供自适应超时取 p80；热重载/重启后重新积累。
         self._synth_durations: Deque[float] = deque(maxlen=_TIMEOUT_SAMPLE_SIZE)
+        # 被 @ / 点名后的一次性优先窗口（只在 trigger.mention_priority 打开时记录）
+        self._mention_priority = _trigger.MentionPriority()
 
     # ------------------------------------------------------------------ 生命周期
 
@@ -172,7 +176,8 @@ class MiMoVoicePlugin(MaiBotPlugin):
         self.ctx.logger.info(
             "MiMo 语音插件已加载：音色=%s, mode=%s, probability=%.2f, 短句上限=%d字, 合成=%s, "
             "风格指令=%s, 参考策略=%s, 英文=%s, 随机需纯中文=%s, 超时策略=%s(%.0fs), 超时重试=%s, "
-            "音色对齐=%s, 尾部裁剪=%dms, 尾部补静音=%dms, 峰值归一=%s, 群聊放行=%s, 私聊放行=%s",
+            "音色对齐=%s, 尾部裁剪=%dms, 尾部补静音=%dms, 峰值归一=%s, 群聊放行=%s, 私聊放行=%s, "
+            "点名优先=%s(%.2f), 情绪加权=%s(+%.2f/上限%.2f)",
             PRESET_DISPLAY_NAMES.get(self.config.voice.preset, self.config.voice.preset),
             self.config.trigger.mode,
             self.config.trigger.probability,
@@ -191,6 +196,11 @@ class MiMoVoicePlugin(MaiBotPlugin):
             "开" if self.config.delivery.peak_normalize else "关",
             self.config.filters.group_mode,
             self.config.filters.private_mode,
+            "开" if self.config.trigger.mention_priority else "关",
+            float(self.config.trigger.mention_probability),
+            "开" if self.config.trigger.emotion_weighting else "关",
+            float(self.config.trigger.emotion_step),
+            float(self.config.trigger.emotion_cap),
         )
         if data_dir is not None:
             self.ctx.logger.info("参考音频目录：%s（自定义音色把文件放这里）", data_dir / "references")
@@ -990,12 +1000,22 @@ class MiMoVoicePlugin(MaiBotPlugin):
                 )
                 next_timeout = None
                 if retries > 0:
-                    next_timeout = _timeout.retry_timeout(time.monotonic() - started_total, timeout)
+                    next_timeout = _timeout.retry_timeout(
+                        time.monotonic() - started_total + _TIMEOUT_RETRY_DELAY_SECONDS, timeout
+                    )
                     if next_timeout is not None:
                         retries -= 1
                         round_no += 1
                         timeout = next_timeout
-                        self.ctx.logger.info("超时后补一次新请求（本次超时 %.1fs）", timeout)
+                        # 试验（0.5.4）：先等一会儿再补发。11-03 六次"超时→立刻补发"全被
+                        # 429 拒绝，怀疑超时那条请求在服务端还占着并发名额；等 2 秒能区分
+                        # "名额未释放"与"上游限流"。观察后决定保留、改退避还是删掉。
+                        await asyncio.sleep(_TIMEOUT_RETRY_DELAY_SECONDS)
+                        self.ctx.logger.info(
+                            "超时后等待 %.1fs 再补一次新请求（本次超时 %.1fs）",
+                            _TIMEOUT_RETRY_DELAY_SECONDS,
+                            timeout,
+                        )
                         continue
                     self.ctx.logger.info("超时后剩余预算不足，直接回退文字")
                 raise TimeoutError(f"语音合成超时（{timeout:.0f}s）") from exc
@@ -1146,6 +1166,33 @@ class MiMoVoicePlugin(MaiBotPlugin):
         user_info = user_info if isinstance(user_info, dict) else {}
         self._remember_scope(scope, session_id, str(group_info.get("group_id") or ""), str(user_info.get("user_id") or ""))
 
+    @HookHandler(
+        "chat.receive.after_process",
+        name="mimo_voice_remember_mention",
+        description="记下这一次被 @ / 点名的会话，供出站时提高语音概率（trigger.mention_priority）",
+        mode=HookMode.OBSERVE,
+        order=HookOrder.EARLY,
+    )
+    async def remember_mention(self, message: Optional[Dict[str, Any]] = None, **kwargs: Any) -> None:
+        if not self.config.trigger.mention_priority:
+            return
+        payload = message if isinstance(message, dict) else {}
+        # 宿主已算好两个布尔字段（message_utils.py 的 _session_message_to_dict）：
+        # is_at=@ 了 bot，is_mentioned=文本里提到 bot 的名字/昵称。@所有人 不算。
+        if not (payload.get("is_at") or payload.get("is_mentioned")):
+            return
+        session_id = str(payload.get("session_id") or kwargs.get("stream_id") or "").strip()
+        if not session_id:
+            return
+        self._mention_priority.record(session_id, float(self.config.trigger.mention_ttl_seconds))
+        self._mention_priority.prune()
+        self.ctx.logger.info(
+            "会话 %s 被点名，下一次回复的语音概率提到 %.2f（有效期 %.0fs）",
+            session_id,
+            max(float(self.config.trigger.probability), float(self.config.trigger.mention_probability)),
+            float(self.config.trigger.mention_ttl_seconds),
+        )
+
     # ------------------------------------------------------------------- 触发
 
     def _stream_id(self, message: Dict[str, Any], kwargs: Dict[str, Any]) -> str:
@@ -1199,26 +1246,59 @@ class MiMoVoicePlugin(MaiBotPlugin):
         cap = int(self.config.trigger.short_reply_max_chars)
         return cap <= 0 or len(text) <= cap
 
-    def _should_convert(self, text: str, stream_id: str, scope: str, group_id: str, user_id: str) -> bool:
+    def _should_convert(
+        self, text: str, stream_id: str, scope: str, group_id: str, user_id: str
+    ) -> Tuple[bool, str, float]:
+        """返回 ``(是否转语音, 触发来源, 当时的概率)``，来源与概率只用于日志。"""
         if scope not in ("group", "private"):
-            return False
+            return False, "scope", 0.0
         if not self._filter_allows(scope, group_id, user_id):
-            return False
+            return False, "filter", 0.0
         mode = self.config.trigger.mode
         if mode == "voice_only":
-            return True
+            return True, "voice_only", 1.0
         if mode == "llm_trigger":
-            return not self._text_override_active(stream_id)
+            return (not self._text_override_active(stream_id)), "llm_trigger", 1.0
         if mode == "random_llm" and self._llm_voice_request_active(stream_id):
             # 模型点名要语音时不受短句上限约束，长句也可以，只是要过 max_text_length
-            return True
+            return True, "llm_request", 1.0
         if not self._short_enough(text):
-            return False
-        if self.config.trigger.random_requires_chinese and _text.contains_latin(text):
+            return False, "short_reply", 0.0
+
+        mention = self.config.trigger.mention_priority and self._mention_priority.active(stream_id)
+        if self.config.trigger.random_requires_chinese and _text.contains_latin(text) and not mention:
             # 随机抽中的一次机会，宁可发文字也别把 token/LLM 念成字母；
-            # 放在抽签之前，避免白耗掉 decision_ttl 内的这次判定
-            return False
-        return self._random_voice_enabled(stream_id)
+            # 放在抽签之前，避免白耗掉 decision_ttl 内的这次判定。
+            # 点名那一次不受此限（用户就是要听），但英文仍按 english_policy 清洗过。
+            return False, "english", 0.0
+
+        probability = float(self.config.trigger.probability)
+        hits: List[str] = []
+        if self.config.trigger.emotion_weighting:
+            bonus, hits = _trigger.emotion_bonus(
+                text,
+                step=float(self.config.trigger.emotion_step),
+                cap=float(self.config.trigger.emotion_cap),
+            )
+            probability = min(1.0, probability + bonus)
+        if mention:
+            probability = max(probability, float(self.config.trigger.mention_probability))
+
+        if mention or self.config.trigger.emotion_weighting:
+            # 点名/情绪让概率逐条变化，decision_ttl 的缓存会把上一条的结论套到下一条上，这里不用缓存
+            enabled = probability >= 1.0 or random.random() < probability
+        else:
+            enabled = self._random_voice_enabled(stream_id)
+
+        if enabled and mention:
+            self._mention_priority.consume(stream_id)
+        if not enabled:
+            return False, "miss", probability
+        if mention:
+            return True, "mention", probability
+        if hits:
+            return True, "emotion(" + "/".join(hits) + ")", probability
+        return True, "random", probability
 
     # --------------------------------------------------------------- 出站 Hook
 
@@ -1260,7 +1340,8 @@ class MiMoVoicePlugin(MaiBotPlugin):
         prepared = self._prepare_text(text)
         if prepared is None:
             return None
-        if not self._should_convert(prepared, stream_id, scope, group_id, user_id):
+        should_convert, reason, probability = self._should_convert(prepared, stream_id, scope, group_id, user_id)
+        if not should_convert:
             return None
 
         try:
@@ -1295,9 +1376,16 @@ class MiMoVoicePlugin(MaiBotPlugin):
         self._llm_voice_requests.pop(stream_id, None)
         self._text_override_sessions.pop(stream_id, None)
         self._random_decisions.pop(stream_id, None)
+        self._mention_priority.consume(stream_id)
         if had_reply:
             self.ctx.logger.info("QQ 语音不支持引用组合，已移除会话 %s 的引用段", stream_id)
-        self.ctx.logger.info("已将会话 %s 的纯文本回复替换为语音（%d 字）", stream_id, len(prepared))
+        self.ctx.logger.info(
+            "已将会话 %s 的纯文本回复替换为语音（%d 字，来源=%s，概率=%.2f）",
+            stream_id,
+            len(prepared),
+            reason,
+            probability,
+        )
         return {"action": "continue", "modified_kwargs": kwargs}
 
     # ------------------------------------------------------------ 规划器工具
