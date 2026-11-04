@@ -84,12 +84,16 @@ checker.equal("网络错误", timeout.classify_failure(FakeClientError("Cannot c
 
 # ---------------------------------------------------------------- 插件接入
 plugin, config, logger = make_plugin(module)
-timeout_mode_before = plugin._current_timeout()
-checker.equal("插件冷启动用配置值", timeout_mode_before, float(config.general.timeout))
+# 0.5.4 起默认 fixed + 40 秒：一条语音只给一次机会，超时不补发。
+checker.equal("插件默认用 fixed 40s", plugin._current_timeout(), 40.0)
+
+auto_config = module.MiMoVoiceConfig(general={"timeout_mode": "auto", "timeout": 20.0})
+plugin.__dict__["_plugin_config_instance"] = auto_config
+checker.equal("auto 冷启动沿用配置值", plugin._current_timeout(), 20.0)
 plugin._synth_durations.extend([2.0, 2.5, 3.0, 3.0, 3.5, 4.0, 4.0, 4.5, 5.0, 6.0])
 auto_value = plugin._current_timeout()
-checker.check("插件样本足够后切换动态值", 15.0 <= auto_value <= 25.0, f"{auto_value}")
-checker.check("动态值不等于配置值", auto_value != float(config.general.timeout), f"{auto_value}")
+checker.check("样本足够后切换动态值", 15.0 <= auto_value <= 25.0, f"{auto_value}")
+checker.check("动态值不等于配置值", auto_value != 20.0, f"{auto_value}")
 
 fixed_config = module.MiMoVoiceConfig(general={"timeout_mode": "fixed", "timeout": 18.0})
 plugin.__dict__["_plugin_config_instance"] = fixed_config

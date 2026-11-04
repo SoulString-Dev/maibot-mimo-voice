@@ -47,16 +47,16 @@ class GeneralConfig(PluginConfigBase):
         description="单条语音可承载的最大文字长度；超长时按 trigger.overflow_policy 处理",
     )
     timeout: float = Field(
-        default=20.0,
+        default=40.0,
         ge=3.0,
         le=120.0,
-        description="单次语音合成超时（秒）；auto 模式下作为样本不足时的兜底值，"
-        "fixed 模式下就是固定超时；超时按 delivery.fallback_to_text 处理",
+        description="单次语音合成超时（秒）。0.5.4 起默认 40 秒、且超时不再重试：一条语音只发一次请求，"
+        "超时即按 delivery.fallback_to_text 回退文字；auto 模式下它是样本不足时的兜底值",
     )
     timeout_mode: Literal["auto", "fixed"] = Field(
-        default="auto",
-        description="超时策略：auto = 按最近合成耗时动态调整（样本 ≥10 条后取 p80×1.4，夹在 15–25 秒）；"
-        "fixed = 始终用上面的 timeout，行为与 0.5.2 一致",
+        default="fixed",
+        description="超时策略：fixed = 始终用上面的 timeout（0.5.4 起默认，一条语音只给一次机会）；"
+        "auto = 按最近合成耗时动态调整（样本 ≥10 条后取 p80×1.4，夹在 15–25 秒）",
     )
 
 
@@ -238,9 +238,10 @@ class MiMoConfig(PluginConfigBase):
         description="仅对 429/5xx/网络错误重试（超时另由 retry_on_timeout 控制）",
     )
     retry_on_timeout: bool = Field(
-        default=True,
-        description="单次合成超时后，若这条语音的总预算（约 40 秒）还够一次有意义的尝试，就换一条新请求重来"
-        "（换连接可能落到健康节点；预算不足直接回退文字）。关掉即完全不做超时重试",
+        default=False,
+        description="单次合成超时后是否再补一条新请求。0.5.4 起默认关闭：11-03/11-04 的 4 次"
+        "「超时→补发」全部被 429 拒绝（上游看起来在防止同一条文本的重复合成），"
+        "补发只会多占单路并发、推迟回退文字，所以默认一条语音只发一次",
     )
     retry_backoff_seconds: float = Field(default=1.5, ge=0.0, le=10.0, description="重试退避基数（秒），按 2 的幂指数增长")
     connect_timeout: float = Field(default=10.0, ge=1.0, le=60.0, description="建立连接的超时（秒），与整体超时分开")

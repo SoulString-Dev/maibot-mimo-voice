@@ -87,7 +87,6 @@ from .core.constants import (
     _TAIL_KEEP_SECONDS,
     _TIMBRE_FULL_STRENGTH_DB,
     _TIMBRE_MAX_GAIN_DB,
-    _TIMEOUT_RETRY_DELAY_SECONDS,
     _TIMEOUT_SAMPLE_SIZE,
     _TTL_CACHE_MAX_ENTRIES,
     PRESET_ALIASES,
@@ -971,15 +970,15 @@ class MiMoVoicePlugin(MaiBotPlugin):
     async def _synthesize_once(self, text: str, timeout: float, attempt: int = 1) -> bytes:
         """合成一次，并给每次请求埋点。
 
-        成功记「语音合成耗时：3.42s（timeout 20.0s，第 1 次，12 字，音频 3.33s）」，失败记
+        成功记「语音合成耗时：3.42s（timeout 40.0s，第 1 次，12 字，音频 3.33s）」，失败记
         「语音合成失败（类型=timeout/429/5xx/network/audio/other，耗时…，timeout …，第 N 次，M 字）：…」。
         字数与音频时长是 0.5.4 补的：0.5.3 复盘时发现超时可能和文本长度有关，但成功行
         只有耗时，配不出「多少字 → 多长时间」，只能拿相邻事件硬对，样本对不齐。
 
-        超时后是否补一次新请求，由 ``core.timeout.retry_timeout`` 决定：这条语音
-        总共最多占用单路 ``_SYNTH_TOTAL_BUDGET_SECONDS``（40 秒），剩余预算不够
-        一次有意义的尝试就直接回退。补的价值是换一条新连接、可能落到健康节点，
-        和"把超时放宽"不是一回事；但 25s 再补 25s 会顶到 50s 并堵住唯一的并发通道。
+        0.5.4 起默认**超时不补发**（``mimo.retry_on_timeout = false``，``general.timeout`` 40 秒）：
+        11-03/11-04 的 4 次「超时 → 等 2 秒 → 补发」全部被 429 拒绝，上游像是在按
+        「同一条文本」限流，补发只会多占单路并发、推迟回退文字。保留补发代码是为了
+        需要时能一键打开（此时仍受 ``_SYNTH_TOTAL_BUDGET_SECONDS`` 40 秒总预算约束）。
         """
         retries = 1 if self.config.mimo.retry_on_timeout else 0
         chars = len(text)
@@ -1001,21 +1000,13 @@ class MiMoVoicePlugin(MaiBotPlugin):
                 next_timeout = None
                 if retries > 0:
                     next_timeout = _timeout.retry_timeout(
-                        time.monotonic() - started_total + _TIMEOUT_RETRY_DELAY_SECONDS, timeout
+                        time.monotonic() - started_total, timeout
                     )
                     if next_timeout is not None:
                         retries -= 1
                         round_no += 1
                         timeout = next_timeout
-                        # 试验（0.5.4）：先等一会儿再补发。11-03 六次"超时→立刻补发"全被
-                        # 429 拒绝，怀疑超时那条请求在服务端还占着并发名额；等 2 秒能区分
-                        # "名额未释放"与"上游限流"。观察后决定保留、改退避还是删掉。
-                        await asyncio.sleep(_TIMEOUT_RETRY_DELAY_SECONDS)
-                        self.ctx.logger.info(
-                            "超时后等待 %.1fs 再补一次新请求（本次超时 %.1fs）",
-                            _TIMEOUT_RETRY_DELAY_SECONDS,
-                            timeout,
-                        )
+                        self.ctx.logger.info("超时后补一次新请求（本次超时 %.1fs）", timeout)
                         continue
                     self.ctx.logger.info("超时后剩余预算不足，直接回退文字")
                 raise TimeoutError(f"语音合成超时（{timeout:.0f}s）") from exc
