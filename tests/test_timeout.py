@@ -1,6 +1,11 @@
-"""自适应超时测试：分位数、动态值、失败归类、插件接入。"""
+"""超时与失败归类测试（0.5.5：只保留固定超时 + 归类）。
+
+0.5.3 的 p80 自适应超时、0.5.4 的"超时后补发"都在 0.5.5 删除，这里额外加了
+"这两个 API 不该再存在"的守卫断言，避免以后被误加回来。
+"""
 from __future__ import annotations
 
+import asyncio
 import sys
 from pathlib import Path
 
@@ -10,66 +15,41 @@ from __bootstrap import Checker, load_plugin, make_plugin
 
 module = load_plugin()
 timeout = sys.modules[f"{module.__name__}.core.timeout"]
-checker = Checker("自适应超时")
+checker = Checker("超时与失败归类")
 
-# ---------------------------------------------------------------- 分位数
-checker.equal("p80 单样本", timeout.percentile([3.0], 0.8), 3.0)
-checker.equal("p80 中位插值", round(timeout.percentile([1.0, 2.0, 3.0], 0.8), 3), 2.6)
-checker.equal("p100 取最大", timeout.percentile([1.0, 5.0, 2.0], 1.0), 5.0)
-checker.equal("p0 取最小", timeout.percentile([4.0, 1.0, 2.0], 0.0), 1.0)
-try:
-    timeout.percentile([], 0.8)
-except ValueError:
-    checker.check("空序列抛 ValueError", True)
-else:
-    checker.check("空序列抛 ValueError", False, "没有抛")
-
-# ---------------------------------------------------------------- 动态超时
-checker.equal("样本不足回退配置值", timeout.effective_timeout([1.0] * 9, config_timeout=20.0), 20.0)
-checker.equal("fixed 模式恒为配置值", timeout.effective_timeout([9.0] * 20, config_timeout=18.0, mode="fixed"), 18.0)
-checker.equal(
-    "样本足够取 p80×1.4",
-    timeout.effective_timeout([11.0] * 10, config_timeout=20.0),
-    15.5,
+# ---------------------------------------------------------------- 已删除的 API
+checker.check(
+    "不再提供 p80 自适应超时",
+    not hasattr(timeout, "effective_timeout"),
+    "effective_timeout 仍然存在",
 )
-checker.equal(
-    "低于下限时夹到 15s",
-    timeout.effective_timeout([1.0] * 10, config_timeout=20.0),
-    15.0,
+checker.check(
+    "不再提供超时后补发",
+    not hasattr(timeout, "retry_timeout"),
+    "retry_timeout 仍然存在",
 )
-checker.equal(
-    "高于上限时夹到 25s",
-    timeout.effective_timeout([30.0] * 10, config_timeout=20.0),
-    25.0,
+defaults = module.MiMoVoiceConfig()
+checker.check(
+    "配置里不再有 timeout_mode",
+    "timeout_mode" not in type(defaults.general).model_fields,
+    "timeout_mode 仍然存在",
 )
-checker.equal(
-    "向上取整到 0.5s",
-    timeout.effective_timeout([3.33] * 10, config_timeout=20.0),
-    15.0,  # 3.33×1.4=4.66 → 夹到下限 15
-)
-checker.equal(
-    "取整后不越上限",
-    timeout.effective_timeout([17.9] * 10, config_timeout=20.0),
-    25.0,  # 17.9×1.4=25.06 → 25.0
-)
-checker.equal(
-    "取整到 0.5s 粒度",
-    timeout.effective_timeout([11.0] * 10, config_timeout=20.0),
-    15.5,  # 11×1.4=15.4 → 15.5
+checker.check(
+    "配置里不再有 retry_on_timeout",
+    "retry_on_timeout" not in type(defaults.mimo).model_fields,
+    "retry_on_timeout 仍然存在",
 )
 
-# ---------------------------------------------------------------- 超时后补一次
-checker.equal("12s 超时后补满（预算 40s）", timeout.retry_timeout(12.0, 12.0), 12.0)
-checker.equal("20s 超时后补 20s", timeout.retry_timeout(20.0, 20.0), 20.0)
-checker.equal("25s 超时后补剩余的 15s", timeout.retry_timeout(25.0, 25.0), 15.0)
-checker.equal("剩余正好 8s 仍补", timeout.retry_timeout(32.0, 25.0), 8.0)
-checker.equal("剩余不足 8s 不补", timeout.retry_timeout(33.0, 25.0), None)
-checker.equal("已用满预算则不补", timeout.retry_timeout(40.0, 12.0), None)
-checker.equal("补的那次不会长于原超时", timeout.retry_timeout(5.0, 12.0), 12.0)
-checker.equal("自定义预算生效", timeout.retry_timeout(20.0, 20.0, budget=30.0), 10.0)
+# ---------------------------------------------------------------- 固定超时
+checker.equal("默认超时 25 秒", module.MiMoVoiceConfig().general.timeout, 25.0)
+checker.equal(
+    "可改成 30 秒",
+    module.MiMoVoiceConfig(general={"timeout": 30.0}).general.timeout,
+    30.0,
+)
 
 # ---------------------------------------------------------------- 失败归类
-checker.equal("超时", timeout.classify_failure(TimeoutError("语音合成超时（20s）")), "timeout")
+checker.equal("超时", timeout.classify_failure(TimeoutError("语音合成超时（25s）")), "timeout")
 checker.equal("429", timeout.classify_failure(RuntimeError("MiMo TTS 暂时不可用: 429 Too Many Requests")), "429")
 checker.equal("5xx", timeout.classify_failure(RuntimeError("MiMo TTS 暂时不可用: 503 Service Unavailable")), "5xx")
 checker.equal("音频校验", timeout.classify_failure(RuntimeError("MiMo TTS 返回音频过短（120 字节）")), "audio")
@@ -84,22 +64,29 @@ checker.equal("网络错误", timeout.classify_failure(FakeClientError("Cannot c
 
 # ---------------------------------------------------------------- 插件接入
 plugin, config, logger = make_plugin(module)
-# 0.5.4 起默认 fixed + 40 秒：一条语音只给一次机会，超时不补发。
-checker.equal("插件默认用 fixed 40s", plugin._current_timeout(), 40.0)
+checker.equal("插件读到的超时就是配置值", float(plugin.config.general.timeout), 25.0)
 
-auto_config = module.MiMoVoiceConfig(general={"timeout_mode": "auto", "timeout": 20.0})
-plugin.__dict__["_plugin_config_instance"] = auto_config
-checker.equal("auto 冷启动沿用配置值", plugin._current_timeout(), 20.0)
-plugin._synth_durations.extend([2.0, 2.5, 3.0, 3.0, 3.5, 4.0, 4.0, 4.5, 5.0, 6.0])
-auto_value = plugin._current_timeout()
-checker.check("样本足够后切换动态值", 15.0 <= auto_value <= 25.0, f"{auto_value}")
-checker.check("动态值不等于配置值", auto_value != 20.0, f"{auto_value}")
+captured = {}
 
-fixed_config = module.MiMoVoiceConfig(general={"timeout_mode": "fixed", "timeout": 18.0})
-plugin.__dict__["_plugin_config_instance"] = fixed_config
-checker.equal("切换到 fixed 后回退 18s", plugin._current_timeout(), 18.0)
 
-# 埋点：耗时入队、日志带 timeout 与第几次
-checker.equal("重载后采样队列长度保持上限", len(plugin._synth_durations), 10)
+async def _fake_once(text: str, timeout: float, attempt: int = 1) -> bytes:
+    captured["timeout"] = timeout
+    captured["attempt"] = attempt
+    captured["text"] = text
+    return b"payload"
+
+
+async def _run_guarded() -> bytes:
+    plugin.__dict__["_synthesize_once"] = _fake_once
+    try:
+        return await plugin._synthesize_guarded("测试文本")
+    finally:
+        plugin.__dict__.pop("_synthesize_once", None)
+
+
+result = asyncio.run(_run_guarded())
+checker.equal("守卫函数把 25 秒传下去", captured.get("timeout"), 25.0)
+checker.equal("默认只请求一次", captured.get("attempt"), 1)
+checker.equal("返回合成结果", result, b"payload")
 
 raise SystemExit(checker.report())

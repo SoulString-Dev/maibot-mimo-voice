@@ -26,9 +26,8 @@ import shutil
 import subprocess
 import time
 import wave
-from collections import deque
 from pathlib import Path
-from typing import Any, Deque, Dict, List, Optional, Tuple, cast
+from typing import Any, Dict, List, Optional, Tuple, cast
 from urllib.parse import urlsplit
 
 import aiohttp
@@ -87,7 +86,6 @@ from .core.constants import (
     _TAIL_KEEP_SECONDS,
     _TIMBRE_FULL_STRENGTH_DB,
     _TIMBRE_MAX_GAIN_DB,
-    _TIMEOUT_SAMPLE_SIZE,
     _TTL_CACHE_MAX_ENTRIES,
     PRESET_ALIASES,
     PRESET_DISPLAY_NAMES,
@@ -151,8 +149,6 @@ class MiMoVoicePlugin(MaiBotPlugin):
         self._reference_built_suffix: Optional[str] = None
         self._warned: set[str] = set()
         self._synthesis_slots = asyncio.Semaphore(1)
-        # 最近若干次成功合成的耗时（秒），供自适应超时取 p80；热重载/重启后重新积累。
-        self._synth_durations: Deque[float] = deque(maxlen=_TIMEOUT_SAMPLE_SIZE)
         # 被 @ / 点名后的一次性优先窗口（只在 trigger.mention_priority 打开时记录）
         self._mention_priority = _trigger.MentionPriority()
 
@@ -174,7 +170,7 @@ class MiMoVoicePlugin(MaiBotPlugin):
         strategy = self.config.voice.reference_strategy
         self.ctx.logger.info(
             "MiMo 语音插件已加载：音色=%s, mode=%s, probability=%.2f, 短句上限=%d字, 合成=%s, "
-            "风格指令=%s, 参考策略=%s, 英文=%s, 随机需纯中文=%s, 超时策略=%s(%.0fs), 超时重试=%s, "
+            "风格指令=%s, 参考策略=%s, 英文=%s, 随机需纯中文=%s, 超时=%.0fs, "
             "音色对齐=%s, 尾部裁剪=%dms, 尾部补静音=%dms, 峰值归一=%s, 群聊放行=%s, 私聊放行=%s, "
             "点名优先=%s(%.2f), 情绪加权=%s(+%.2f/上限%.2f)",
             PRESET_DISPLAY_NAMES.get(self.config.voice.preset, self.config.voice.preset),
@@ -186,9 +182,7 @@ class MiMoVoicePlugin(MaiBotPlugin):
             strategy,
             self.config.trigger.english_policy,
             "开" if self.config.trigger.random_requires_chinese else "关",
-            str(getattr(self.config.general, "timeout_mode", "auto")),
             float(self.config.general.timeout),
-            "开" if self.config.mimo.retry_on_timeout else "关",
             "开" if self.config.delivery.timbre_match else "关",
             int(self.config.delivery.trim_tail_silence_ms),
             int(self.config.delivery.tail_pad_ms),
@@ -958,86 +952,58 @@ class MiMoVoicePlugin(MaiBotPlugin):
         self._warned.add(key)
         self.ctx.logger.warning(message, *args)
 
-    def _current_timeout(self) -> float:
-        """这次合成该用的超时：``auto`` 按最近耗时算，``fixed`` 用配置值。"""
-        mode = str(getattr(self.config.general, "timeout_mode", "auto"))
-        return _timeout.effective_timeout(
-            self._synth_durations,
-            config_timeout=float(self.config.general.timeout),
-            mode=mode,
-        )
-
     async def _synthesize_once(self, text: str, timeout: float, attempt: int = 1) -> bytes:
-        """合成一次，并给每次请求埋点。
+        """合成一次，并给这次请求埋点。
 
-        成功记「语音合成耗时：3.42s（timeout 40.0s，第 1 次，12 字，音频 3.33s）」，失败记
+        成功记「语音合成耗时：3.42s（timeout 25.0s，第 1 次，12 字，音频 3.33s）」，失败记
         「语音合成失败（类型=timeout/429/5xx/network/audio/other，耗时…，timeout …，第 N 次，M 字）：…」。
         字数与音频时长是 0.5.4 补的：0.5.3 复盘时发现超时可能和文本长度有关，但成功行
-        只有耗时，配不出「多少字 → 多长时间」，只能拿相邻事件硬对，样本对不齐。
+        只有耗时，配不出「多少字 → 多长时间」。
 
-        0.5.4 起默认**超时不补发**（``mimo.retry_on_timeout = false``，``general.timeout`` 40 秒）：
-        11-03/11-04 的 4 次「超时 → 等 2 秒 → 补发」全部被 429 拒绝，上游像是在按
-        「同一条文本」限流，补发只会多占单路并发、推迟回退文字。保留补发代码是为了
-        需要时能一键打开（此时仍受 ``_SYNTH_TOTAL_BUDGET_SECONDS`` 40 秒总预算约束）。
+        0.5.5 起**一条语音只发一次请求**：11-06 的名额实验（``docs/analysis-dual-draft.md``）
+        证明 MiMo 每个账号的 TTS 并发名额只有 1，客户端超时后服务端那条仍在生成、仍占名额
+        （实测最长 72.7 秒），所以"超时后补发"必然撞 429（0.3–0.5 秒内被拒）。补发与
+        动态超时（0.5.3 的 p80×1.4、12–25 秒）都已删除，超时即回退文字。
         """
-        retries = 1 if self.config.mimo.retry_on_timeout else 0
         chars = len(text)
-        started_total = time.monotonic()
-        round_no = max(1, attempt)
-        while True:
-            started = time.monotonic()
-            try:
-                payload = await asyncio.wait_for(self._synthesize(text), timeout=timeout)
-            except asyncio.TimeoutError as exc:
-                elapsed = time.monotonic() - started
-                self.ctx.logger.warning(
-                    "语音合成失败（类型=timeout，耗时 %.2fs，timeout %.1fs，第 %d 次，%d 字）",
-                    elapsed,
-                    timeout,
-                    round_no,
-                    chars,
-                )
-                next_timeout = None
-                if retries > 0:
-                    next_timeout = _timeout.retry_timeout(
-                        time.monotonic() - started_total, timeout
-                    )
-                    if next_timeout is not None:
-                        retries -= 1
-                        round_no += 1
-                        timeout = next_timeout
-                        self.ctx.logger.info("超时后补一次新请求（本次超时 %.1fs）", timeout)
-                        continue
-                    self.ctx.logger.info("超时后剩余预算不足，直接回退文字")
-                raise TimeoutError(f"语音合成超时（{timeout:.0f}s）") from exc
-            except Exception as exc:
-                elapsed = time.monotonic() - started
-                self.ctx.logger.warning(
-                    "语音合成失败（类型=%s，耗时 %.2fs，timeout %.1fs，第 %d 次，%d 字）：%s",
-                    _timeout.classify_failure(exc),
-                    elapsed,
-                    timeout,
-                    round_no,
-                    chars,
-                    exc,
-                )
-                raise
-            elapsed = time.monotonic() - started
-            self._synth_durations.append(elapsed)
-            seconds = _payload_seconds(payload)
-            audio_text = f"{seconds:.2f}s" if seconds is not None else "未知"
-            self.ctx.logger.info(
-                "语音合成耗时：%.2fs（timeout %.1fs，第 %d 次，%d 字，音频 %s）",
-                elapsed,
+        started = time.monotonic()
+        try:
+            payload = await asyncio.wait_for(self._synthesize(text), timeout=timeout)
+        except asyncio.TimeoutError as exc:
+            self.ctx.logger.warning(
+                "语音合成失败（类型=timeout，耗时 %.2fs，timeout %.1fs，第 %d 次，%d 字）",
+                time.monotonic() - started,
                 timeout,
-                round_no,
+                attempt,
                 chars,
-                audio_text,
             )
-            return payload
+            raise TimeoutError(f"语音合成超时（{timeout:.0f}s）") from exc
+        except Exception as exc:
+            self.ctx.logger.warning(
+                "语音合成失败（类型=%s，耗时 %.2fs，timeout %.1fs，第 %d 次，%d 字）：%s",
+                _timeout.classify_failure(exc),
+                time.monotonic() - started,
+                timeout,
+                attempt,
+                chars,
+                exc,
+            )
+            raise
+        elapsed = time.monotonic() - started
+        seconds = _payload_seconds(payload)
+        audio_text = f"{seconds:.2f}s" if seconds is not None else "未知"
+        self.ctx.logger.info(
+            "语音合成耗时：%.2fs（timeout %.1fs，第 %d 次，%d 字，音频 %s）",
+            elapsed,
+            timeout,
+            attempt,
+            chars,
+            audio_text,
+        )
+        return payload
 
     async def _synthesize_guarded(self, text: str) -> bytes:
-        timeout = self._current_timeout()
+        timeout = float(self.config.general.timeout)
         attempts = max(0, int(self.config.mimo.retry_attempts))
         backoff = max(0.0, float(self.config.mimo.retry_backoff_seconds))
         last_error: Optional[BaseException] = None
