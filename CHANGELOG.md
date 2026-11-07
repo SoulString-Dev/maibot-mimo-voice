@@ -8,7 +8,7 @@ README 只保留最新一版的要点。
 ### 新增
 
 - **点名优先**（`trigger.mention_priority`，默认关）：被 @ 或文本里点到 bot 的名字后，把**下一次**回复的语音概率抬到 `mention_probability`（默认 0.6，与 `probability` 取较大值）；用掉即清，没用到在 `mention_ttl_seconds`（90 秒）后作废，@所有人不算点名。点名那一次跳过 `random_requires_chinese`（用户点名就是想听声音），但英文仍按 `english_policy` 清洗，短句上限照旧生效。
-- **情绪加权**（`trigger.emotion_weighting`，默认关）：回复里出现感叹号、连续问号、波浪号、省略号、叠字、拟声词、emoji 时按项加分（每项 `emotion_step` = 0.04，最多 `emotion_cap` = 0.2）；只抬概率，不改写文本。
+- **情绪加权**（`trigger.emotion_weighting`，默认关）：回复里出现感叹号、连续问号、波浪号、省略号、叠字、拟声词、emoji 时按项加分（每项 `emotion_step` = 0.04，最多 `emotion_cap` = 0.2）；只抬概率，不改写文本。判定用**清洗前**的原始回复——11-06→11-07 的观察窗里 27 条成功语音 `来源=emotion` 命中 0 次，排查发现 `sanitize_for_tts` 已把 `？？` 折成 `？`、`～`/`…` 折成逗号、emoji 删掉，用清洗后的文本判断会让四类规则永远无法命中。
 - **触发来源埋点**：成功行追加 `来源=random|mention|emotion(标签)|llm_request|voice_only|llm_trigger，概率=0.15`；`core/trigger.py` 的规则与窗口独立可测。
 - **埋点补字数与音频时长**：成功行变成 `语音合成耗时：3.42s（timeout 25.0s，第 1 次，12 字，音频 3.33s）`，失败行补 `，12 字`。0.5.3 复盘时只有耗时、没有字数，只能拿相邻事件硬配，样本对不齐（75 对里相关系数 0.065，等于白算）。
 - 新增 `tests/test_trigger.py`（情绪规则、一次性窗口与过期、点名/短句/英文的交互、确定性模式）。

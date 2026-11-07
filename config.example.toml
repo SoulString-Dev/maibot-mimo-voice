@@ -125,6 +125,7 @@ mention_ttl_seconds = 90.0
 # ---- 情绪加权（默认关）----
 # 回复里出现感叹号、连续问号、波浪号、省略号、叠字、拟声词、emoji 时按项加分，
 # 每项 emotion_step、最多 emotion_cap；只抬概率，不做任何文本改写。
+# 判定用的是清洗前的原始回复：朗读清洗会把「？？」折成「？」、把「～」「…」折成逗号、删掉 emoji。
 emotion_weighting = false
 emotion_step = 0.04
 emotion_cap = 0.2

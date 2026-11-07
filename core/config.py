@@ -120,7 +120,7 @@ class TriggerConfig(PluginConfigBase):
     emotion_weighting: bool = Field(
         default=False,
         description="按回复文本的情绪标记（感叹号、连续问号、波浪号、省略号、叠字、拟声词、emoji）"
-        "给抽签概率加分（默认关）",
+        "给抽签概率加分（默认关）；判定看清洗前的原始回复，清洗过程会折掉大部分标记",
     )
     emotion_step: float = Field(
         default=0.04,

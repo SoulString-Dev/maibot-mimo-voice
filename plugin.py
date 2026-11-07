@@ -1204,9 +1204,21 @@ class MiMoVoicePlugin(MaiBotPlugin):
         return cap <= 0 or len(text) <= cap
 
     def _should_convert(
-        self, text: str, stream_id: str, scope: str, group_id: str, user_id: str
+        self,
+        text: str,
+        stream_id: str,
+        scope: str,
+        group_id: str,
+        user_id: str,
+        *,
+        raw_text: Optional[str] = None,
     ) -> Tuple[bool, str, float]:
-        """返回 ``(是否转语音, 触发来源, 当时的概率)``，来源与概率只用于日志。"""
+        """返回 ``(是否转语音, 触发来源, 当时的概率)``，来源与概率只用于日志。
+
+        ``text`` 是清洗后的朗读文本，``raw_text`` 是模型原始回复。
+        情绪加权必须看原始回复：清洗会把 ``！！`` 折成一个 ``！``、``？？`` 折成 ``？``、
+        ``～``/``…``/emoji 直接删掉，用清洗后的文本判断会让大部分情绪标记永远命中不了。
+        """
         if scope not in ("group", "private"):
             return False, "scope", 0.0
         if not self._filter_allows(scope, group_id, user_id):
@@ -1232,8 +1244,9 @@ class MiMoVoicePlugin(MaiBotPlugin):
         probability = float(self.config.trigger.probability)
         hits: List[str] = []
         if self.config.trigger.emotion_weighting:
+            # 用原始回复判断情绪：清洗后的文本已经丢掉大部分标记（见 docstring）
             bonus, hits = _trigger.emotion_bonus(
-                text,
+                text if raw_text is None else raw_text,
                 step=float(self.config.trigger.emotion_step),
                 cap=float(self.config.trigger.emotion_cap),
             )
@@ -1297,7 +1310,9 @@ class MiMoVoicePlugin(MaiBotPlugin):
         prepared = self._prepare_text(text)
         if prepared is None:
             return None
-        should_convert, reason, probability = self._should_convert(prepared, stream_id, scope, group_id, user_id)
+        should_convert, reason, probability = self._should_convert(
+            prepared, stream_id, scope, group_id, user_id, raw_text=text
+        )
         if not should_convert:
             return None
 

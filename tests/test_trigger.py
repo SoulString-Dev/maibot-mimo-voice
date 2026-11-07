@@ -102,4 +102,24 @@ checker.check("情绪来源带标签", reason.startswith("emotion(") or reason =
 plugin.__dict__["_plugin_config_instance"] = module.MiMoVoiceConfig(trigger={"mode": "voice_only"})
 checker.equal("voice_only 恒为真", plugin._should_convert("随便", "s", "group", "1", "2"), (True, "voice_only", 1.0))
 
+# 情绪看的是原始回复：清洗会把 ？？ 折成 ？、～ 折成逗号、emoji 删掉
+plugin.__dict__["_plugin_config_instance"] = module.MiMoVoiceConfig(
+    trigger={"emotion_weighting": True, "emotion_step": 0.15, "emotion_cap": 0.5, "probability": 0.0}
+)
+cleaned = plugin._sanitize_for_tts("真的吗？？")
+checker.equal("清洗后只剩一个问号", cleaned, "真的吗？")
+bonus_clean = trigger.emotion_bonus(cleaned, step=0.15, cap=0.5)
+checker.equal("清洗后问句不再命中", bonus_clean, (0.0, []))
+_, _, prob_clean = plugin._should_convert(cleaned, "sess-6", "group", "123456", "10000002")
+checker.equal("只看清洗文本时为基准概率", round(prob_clean, 3), 0.0)
+converted, reason, probability = plugin._should_convert(
+    cleaned, "sess-6", "group", "123456", "10000002", raw_text="真的吗？？"
+)
+checker.equal("看原始回复时命中问句", round(probability, 3), 0.15)
+checker.check("来源标注问句", reason.startswith("emotion(") or reason == "miss", reason)
+converted, reason, _ = plugin._should_convert(
+    "好", "sess-7", "group", "123456", "10000002", raw_text="好～"
+)
+checker.equal("波浪号只看原始回复才命中", round(trigger.emotion_bonus("好～", step=0.15, cap=0.5)[0], 3), 0.15)
+
 raise SystemExit(checker.report())
