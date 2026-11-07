@@ -50,7 +50,7 @@ allow_private_base_url = false
 # 同时进行的合成请求数（1–4）：实测 3 路以上会排队，建议保持 1。
 max_concurrent = 1
 # 遇到 429 / 5xx / 网络错误时的重试次数（0–3）。超时不属于可重试错误：
-# 0.5.5 起一条语音只发一次请求（超时后重发必撞 429，见 docs/analysis-dual-draft.md）。
+# 0.5.4 起一条语音只发一次请求（超时后重发必撞 429，见 docs/analysis-dual-draft.md）。
 retry_attempts = 0
 # 重试的退避基数（秒），按 1.5 → 3 → 6 递增。
 retry_backoff_seconds = 1.5

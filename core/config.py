@@ -50,7 +50,7 @@ class GeneralConfig(PluginConfigBase):
         default=25.0,
         ge=3.0,
         le=120.0,
-        description="单次语音合成超时（秒）。0.5.5 起固定值、不重试：一条语音只发一次请求，超时即按"
+        description="单次语音合成超时（秒）。0.5.4 起固定值、不重试：一条语音只发一次请求，超时即按"
         "delivery.fallback_to_text 回退文字。默认 25 秒——线上成功请求里 20–25 秒区间 0 条，"
         "25 秒与 20 秒等价；只有 6% 的长尾（28–33 秒）会被放弃，换来失败时早 5 秒回文字",
     )
@@ -231,7 +231,7 @@ class MiMoConfig(PluginConfigBase):
         default=0,
         ge=0,
         le=3,
-        description="仅对 429/5xx/网络错误重试；超时不属于可重试错误（0.5.5 起一条语音只发一次请求）",
+        description="仅对 429/5xx/网络错误重试；超时不属于可重试错误（0.5.4 起一条语音只发一次请求）",
     )
     retry_backoff_seconds: float = Field(default=1.5, ge=0.0, le=10.0, description="重试退避基数（秒），按 2 的幂指数增长")
     connect_timeout: float = Field(default=10.0, ge=1.0, le=60.0, description="建立连接的超时（秒），与整体超时分开")
