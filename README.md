@@ -219,7 +219,7 @@ private_mode = "all"
 │   ├── config.py                # 配置模型 + api_base_url 校验
 │   ├── text.py                  # 朗读清洗 / 英文口癖策略
 │   └── audio.py                 # WAV 读写 / 频谱曲线 / 音色对齐矩阵
-├── tests/                       # 163 条断言，不依赖 pytest
+├── tests/                       # 169 条断言，不依赖 pytest
 ├── config.example.toml
 ├── _manifest.json
 ├── assets/icon.svg              # 商店图标
@@ -331,7 +331,7 @@ python -c "import tomllib; tomllib.load(open('config.example.toml','rb'))"
 pip install -r requirements-dev.txt
 ruff check .
 mypy plugin.py core   # 需先装 maibot-plugin-sdk，否则基类被当作 Any，会漏掉 self.config 的类型问题
-python tests/run_all.py     # 文本/音频/配置/超时/触发五组共 163 条断言
+python tests/run_all.py     # 文本/音频/配置/超时/触发五组共 169 条断言
 ```
 
 CI（`.github/workflows/ci.yml`）在每次 push / PR 上跑同样三条命令：ruff、mypy、单测。
