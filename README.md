@@ -338,6 +338,8 @@ mypy plugin.py core   # 需先装 maibot-plugin-sdk，否则基类被当作 Any�
 python tests/run_all.py     # 文本/音频/配置/超时/触发/命令六组共 228 条断言
 ```
 
+Windows 上等价的一条命令：`pwsh -File tools/run_checks.ps1`（已处理控制台编码与临时目录的差异）。
+
 CI（`.github/workflows/ci.yml`）在每次 push / PR 上跑同样三条命令。测试不依赖 pytest，只用标准库，容器里 `/MaiMBot/.venv/bin/python tests/run_all.py` 也能直接跑。
 
 部署到运行中的麦麦（示例：NAS 上的容器）：

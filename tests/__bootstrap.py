@@ -7,15 +7,34 @@
 """
 from __future__ import annotations
 
+import contextlib
 import importlib.util
 import logging
+import shutil
 import sys
+import tempfile
+import uuid
 from pathlib import Path
 from types import ModuleType
-from typing import Any, List
+from typing import Any, Iterator, List
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PLUGIN_FILE = REPO_ROOT / "plugin.py"
+
+
+@contextlib.contextmanager
+def temp_dir() -> Iterator[Path]:
+    """临时目录，替代 `tempfile.TemporaryDirectory`。
+
+    Windows 上 `mkdtemp` 会显式设成 0700 的 DACL，在受限令牌（CI、沙箱）里
+    连自己写进去都会被拒；这里用普通 `mkdir`（继承父目录权限），结束后尽力删除。
+    """
+    path = Path(tempfile.gettempdir()) / f"maibot-test-{uuid.uuid4().hex}"
+    path.mkdir()
+    try:
+        yield path
+    finally:
+        shutil.rmtree(path, ignore_errors=True)
 
 
 class FakeLogger:

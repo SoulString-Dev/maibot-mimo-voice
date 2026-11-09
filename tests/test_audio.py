@@ -4,12 +4,11 @@ from __future__ import annotations
 import math
 import os
 import sys
-import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from __bootstrap import Checker, load_plugin, make_plugin
+from __bootstrap import Checker, load_plugin, make_plugin, temp_dir
 
 module = load_plugin()
 checker = Checker("音频侧")
@@ -108,7 +107,7 @@ inst2._postprocess(clean)
 checker.equal("无改动时不打 info", len([m for m in logger2.messages("info") if m.startswith("语音后处理")]), 0)
 
 # ---------------------------------------------------------------- 缓存清理
-with tempfile.TemporaryDirectory() as tmp:
+with temp_dir() as tmp:
     cache_root = Path(tmp)
     cache = cache_root / "reference-cache"
     cache.mkdir()
@@ -148,7 +147,7 @@ warnings4 = [text for text in logger4.messages("warning") if "音色对齐失败
 checker.equal("对齐失败留一条告警", len(warnings4), 1)
 
 # ---------------------------------------------------------------- 参考音频换了要重算目标曲线
-with tempfile.TemporaryDirectory() as tmp:
+with temp_dir() as tmp:
     root = Path(tmp)
     ref = root / "probe.wav"
     ref.write_bytes(make_wav(0.8, freq=220.0))
@@ -163,7 +162,7 @@ with tempfile.TemporaryDirectory() as tmp:
     checker.check("参考音频变化后目标曲线重算", first is not None and second is not None and first != second)
 
 # ---------------------------------------------------------------- 缓存清理带上分片目录
-with tempfile.TemporaryDirectory() as tmp2:
+with temp_dir() as tmp2:
     root2 = Path(tmp2)
     cache2 = root2 / "reference-cache"
     cache2.mkdir()
@@ -234,7 +233,7 @@ smoothed = module.smooth_gain_bands([0.0, 0.0, 6.0, 0.0, 0.0])
 checker.check("频带增益被平滑", float(smoothed[2]) < 6.0 and float(smoothed[2]) > 0.0, f"{float(smoothed[2]):.2f}")
 
 # 参考瘦身走插件链路：长参考自动缩短，缓存命中后不再重算
-with tempfile.TemporaryDirectory() as tmp:
+with temp_dir() as tmp:
     root = Path(tmp)
     ref = root / "long.wav"
     ref.write_bytes(long_reference)
