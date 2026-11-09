@@ -9,6 +9,7 @@
 - 语音条**替换**文字：命中的那条只发语音、不发文字；合成失败或超时回退文字，消息不会丢。
 - 四种触发方式：随机抽签、随机 + 模型主动请求（默认）、语音优先、全量。
 - 群聊 / 私聊各自独立的 `all / whitelist / blacklist` 放行策略。
+- 管理员可私聊发 `/voice`（或 `/vc`）手动试听、查看状态、往指定群/QQ 发语音。
 - 合成前清洗文本（表情、引号、波浪号、省略号、重复标点），并用风格指令压住音色漂移；英文默认只删 `ww` / `emmm` 这类复读口癖，`LLM`、`token`、`cos` 等真词原样朗读。
 
 | 与上游的差异 | 原因 |
@@ -124,6 +125,33 @@ MiMo 对 TTS 的限制不是只有 RPM / TPM：**每个账号的模型并发名�
 
 效果（11-06 13:30 → 11-07 21:47，32.3 小时）：32 条成功 / 4 条超时 / **0 次 429**；健康时段（每小时成功 p50 ≤ 8 秒）占比 93.1%。
 
+## 手动命令（0.5.5）
+
+管理员可以在**私聊**里用 `/voice` 或 `/vc` 手动控制，不经过 LLM：
+
+| 命令 | 作用 |
+|---|---|
+| `/voice on` / `/voice off` | 开关**当前私聊/群会话**的自动语音；进程内有效，重启复位（全局开关仍是 `trigger.mode` 与放行策略） |
+| `/voice test <文本>` | 立刻朗读这段文本，发到当前私聊 |
+| `/voice say <目标> <文本>` | 把语音发到指定群或 QQ；目标写群号 / QQ 号，也可用 `g群号` / `uQQ号` 指定类型 |
+| `/voice status` | 版本、音色、触发参数、超时并发、本会话开关与近期合成耗时 |
+| `/voice help` | 命令帮助 |
+
+```toml
+[commands]
+enabled = true
+# 可填多个：纯 QQ 号，或带平台的写法（qq:10000002）
+admins = ["10000002"]
+test_max_chars = 200
+# say 的目标白名单，留空表示任意目标
+say_targets = []
+```
+
+- **只在私聊生效**：群里发 `/voice` 只会回一句"请私聊"，不会执行、也不会进模型。
+- 管理员列表留空时，命令会回「还没有配置管理员」，不会有人能用。
+- `/voice say` 先找活跃会话，找不到再尝试新建；两种都失败会明确报错，不会静默丢消息。
+- `test` / `say` 超过 `test_max_chars` 直接拒绝，不静默截断；命令回执是普通文字，不进模型上下文。
+
 ## 群聊 / 私聊过滤
 
 两者互不影响，例如"群聊只放行一个群、私聊全放行"：
@@ -137,7 +165,7 @@ private_mode = "all"
 
 `group_mode` 与 `private_mode` 都不是 `all` 时，插件会记录入站消息的群号 / 对方 QQ 号（`chat.receive.before_process`），出站时按名单判断；两者都是 `all` 时不记录，零额外开销。拿不到对方身份时（映射过期等）一律保持文字，不误放行。
 
-## 配置说明（共 43 项，日常只需动前 12 项）
+## 配置说明（共 47 项，日常只需动前 12 项）
 
 ### 基础
 
@@ -162,7 +190,7 @@ private_mode = "all"
 
 | 配置 | 默认 | 说明 |
 |---|---|---|
-| `plugin.config_version` | `0.5.4` | 配置版本号（内部使用，无需修改） |
+| `plugin.config_version` | `0.5.5` | 配置版本号（内部使用，无需修改） |
 | `mimo.api_base_url` | `https://api.xiaomimimo.com/v1` | 必须是 https 公网地址；写成内网/本机地址会回退官方地址并告警 |
 | `mimo.model` | `mimo-v2.5-tts-voiceclone` | 也可用 `mimo-v2.5-tts`（预置音色） |
 | `mimo.audio_format` | `mp3` | `mp3` / `wav`；开了任一音频后处理时自动改用 `wav`，此项实际被忽略 |
@@ -186,6 +214,10 @@ private_mode = "all"
 | `delivery.trim_tail_silence_ms` | `250` | 尾部静音超过这个毫秒数就裁掉（只留 150ms），0 = 不裁 |
 | `delivery.tail_pad_ms` | `120` | 处理完后补多少毫秒尾静音，避免播放端吃掉最后一个字 |
 | `delivery.peak_normalize` | `true` | 峰值统一拉到 −1.5 dBFS；单条最多提 +6 dB 并软限幅，避免放大破音 |
+| `commands.enabled` | `true` | 是否响应 `/voice`、`/vc` 命令 |
+| `commands.admins` | `[]` | 允许使用命令的账号（QQ 号或 `qq:ID`），可填多个；留空谁都不能用 |
+| `commands.test_max_chars` | `200` | `test` / `say` 单次最多朗读多少字，超过直接拒绝 |
+| `commands.say_targets` | `[]` | `say` 的目标白名单，留空表示任意目标 |
 | `filters.group_mode` | `all` | 群聊放行：`all` / `whitelist` / `blacklist` |
 | `filters.private_mode` | `all` | 私聊放行：`all` / `whitelist` / `blacklist` |
 | `filters.group_ids` | `[]` | 群号列表 |
@@ -213,8 +245,9 @@ private_mode = "all"
 │   ├── text.py                  # 朗读清洗 / 英文口癖策略
 │   ├── audio.py                 # WAV 读写 / 频谱曲线 / 音色对齐 / 参考瘦身
 │   ├── trigger.py               # 点名窗口 / 情绪加分
-│   └── timeout.py               # 失败归类
-├── tests/                       # 169 条断言，不依赖 pytest
+│   ├── timeout.py               # 失败归类
+│   └── commands.py              # /voice 解析与回执文案
+├── tests/                       # 228 条断言，不依赖 pytest
 ├── config.example.toml
 ├── _manifest.json
 ├── assets/icon.svg              # 商店图标
@@ -275,6 +308,13 @@ private_mode = "all"
 
 ## 更新日志
 
+### 0.5.5
+
+- **手动命令层**：`/voice`（或 `/vc`）新增 `on` / `off` / `test` / `status` / `say` / `help`，全部仅私聊、仅管理员（`commands.admins` 可配多人，支持 `qq:ID` 写法）。`say` 可把语音发到指定群或 QQ，目标解析按「活跃会话 → 新建会话」依次尝试。
+- **点名 / 情绪加权验收**：情绪判定已改用清洗前的原始回复；本轮补上来源分布的全量统计口径（不再用临时脚本估）。
+- **参考体检与迁移提示**：旧布局（音色文件在插件根目录）仍兼容，但启动时会提示一次建议迁到 `presets/`。
+- 新增 `tools/config_compat.py`，可检查/修复「命令配置写错段落」的旧配置。
+
 ### 0.5.4
 
 - **一条语音只发一次请求，超时固定 25 秒**：删除 p80 自适应超时（`timeout_mode`）与超时补发（`retry_on_timeout`）。依据是 11-06 的名额实验：账号级 TTS 并发名额只有 1，超时后服务端仍在生成（最长 72.7 秒），补发必 429。
@@ -295,7 +335,7 @@ python -c "import tomllib; tomllib.load(open('config.example.toml','rb'))"
 pip install -r requirements-dev.txt
 ruff check .
 mypy plugin.py core   # 需先装 maibot-plugin-sdk，否则基类被当作 Any，会漏掉 self.config 的类型问题
-python tests/run_all.py     # 文本/音频/配置/超时/触发五组共 169 条断言
+python tests/run_all.py     # 文本/音频/配置/超时/触发/命令六组共 228 条断言
 ```
 
 CI（`.github/workflows/ci.yml`）在每次 push / PR 上跑同样三条命令。测试不依赖 pytest，只用标准库，容器里 `/MaiMBot/.venv/bin/python tests/run_all.py` 也能直接跑。

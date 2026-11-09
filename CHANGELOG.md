@@ -3,6 +3,23 @@
 本文件是版本变更的**唯一事实源**：发版时先改这里，再把对应段落拷进 GitHub Release 说明。
 README 只保留最新一版的要点。
 
+## [0.5.5] - 2026-11-09
+
+### 新增
+
+- **手动命令层**：`/voice`（或 `/vc`）提供 `on` / `off` / `test` / `status` / `say` / `help`。**只在私聊、只对 `commands.admins` 里的账号生效**（可填多个，支持 `qq:10000002` 写法；留空则谁都不能用，避免默认把控制权交给所有使用者）。命令回复由插件自己发送、`intercept=1`，不进模型上下文；`/voice test` 成功时只发语音不发回执。
+- **会话级开关**：`/voice on|off` 只影响当前会话，进程内有效、重启复位；全局开关仍是 `trigger.mode` 与放行策略。
+- **跨会话发送**：`/voice say <目标> <文本>` 支持群号 / QQ 号，也可用 `g群号` / `uQQ号` 显式指定；先查活跃会话，查不到再尝试新建，失败会明确报错。`commands.say_targets` 可限制目标白名单（留空 = 任意）。
+- **状态查询**：`/voice status` 汇总版本音色、触发参数、点名/情绪开关、超时并发、本会话开关与最近 20 次合成耗时，不新增埋点。
+- **旧布局迁移提示**：音色文件还放在插件根目录时，启动日志给一次提示建议移到 `presets/`（仍可读取），对应商店审核 #1256 的建议。
+- **`tools/config_compat.py`**：检查 / 修复命令配置写错段落（例如写进 `[plugin]`）的旧配置。
+- `mai-tools/source_breakdown.py`（仓库外）：按版本/音色统计成功率、耗时分位、触发来源与忙次数，替代临时脚本。
+
+### 修改
+
+- `plugin.config_version` 升到 0.5.5；`config_version` 与 `[commands]` 段同步进 `config.example.toml`。
+- `_manifest.json` 声明新用到的能力：`send.text`、`send.hybrid`、`chat.get_stream_by_group_id`、`chat.get_stream_by_user_id`、`chat.open_session`。
+
 ## [0.5.4] - 2026-11-02
 
 ### 新增

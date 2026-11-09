@@ -44,12 +44,79 @@ class FakeLogger:
         return [text for lvl, text in self.records if level is None or lvl == level]
 
 
+class FakeSend:
+    """记录命令回执与语音发送，不碰宿主。"""
+
+    def __init__(self) -> None:
+        self.texts: List[tuple[str, str]] = []
+        self.hybrids: List[tuple[str, List[dict]]] = []
+        self.error: Exception | None = None
+
+    async def text(self, text: str, stream_id: str, **kwargs: Any) -> bool:
+        if self.error is not None:
+            raise self.error
+        self.texts.append((stream_id, text))
+        return True
+
+    async def hybrid(self, segments: List[dict], stream_id: str, **kwargs: Any) -> bool:
+        if self.error is not None:
+            raise self.error
+        self.hybrids.append((stream_id, segments))
+        return True
+
+
+class FakeChat:
+    """假的会话目录：``groups`` / ``users`` 是 ID → session_id 的映射。"""
+
+    def __init__(self) -> None:
+        self.groups: dict[str, str] = {}
+        self.users: dict[str, str] = {}
+        self.opened: List[tuple[str, str, str]] = []
+        self.can_open = True
+
+    async def get_stream_by_group_id(self, group_id: str, platform: str = "qq") -> dict:
+        session_id = self.groups.get(group_id)
+        if not session_id:
+            return {"success": False, "stream": None}
+        return {"success": True, "stream": {"session_id": session_id}}
+
+    async def get_stream_by_user_id(self, user_id: str, platform: str = "qq") -> dict:
+        session_id = self.users.get(user_id)
+        if not session_id:
+            return {"success": False, "stream": None}
+        return {"success": True, "stream": {"session_id": session_id}}
+
+    async def open_session(
+        self,
+        platform: str = "qq",
+        chat_type: str = "private",
+        *,
+        user_id: str = "",
+        group_id: str = "",
+        account_id: str = "",
+        scope: str = "",
+        **kwargs: Any,
+    ) -> dict:
+        if not self.can_open:
+            return {"success": False, "created": False, "stream": None, "error": "无法新建"}
+        key = group_id if chat_type == "group" else user_id
+        session_id = f"{chat_type}:{key}"
+        self.opened.append((chat_type, key, platform))
+        if chat_type == "group":
+            self.groups[key] = session_id
+        else:
+            self.users[key] = session_id
+        return {"success": True, "created": True, "stream": {"session_id": session_id}}
+
+
 class FakeCtx:
-    """只实现插件用到的 ctx 能力：logger / paths。"""
+    """只实现插件用到的 ctx 能力：logger / paths / send / chat。"""
 
     def __init__(self, logger: FakeLogger, data_dir: Path | None = None, runtime_dir: Path | None = None) -> None:
         self.logger = logger
         self.paths = type("Paths", (), {"data_dir": data_dir, "runtime_dir": runtime_dir})()
+        self.send = FakeSend()
+        self.chat = FakeChat()
 
 
 def load_plugin() -> ModuleType:

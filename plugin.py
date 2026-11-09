@@ -31,9 +31,10 @@ from typing import Any, Dict, List, Optional, Tuple, cast
 from urllib.parse import urlsplit
 
 import aiohttp
-from maibot_sdk import CONFIG_RELOAD_SCOPE_SELF, HookHandler, MaiBotPlugin, Tool
+from maibot_sdk import CONFIG_RELOAD_SCOPE_SELF, Command, HookHandler, MaiBotPlugin, Tool
 from maibot_sdk.types import ErrorPolicy, HookMode, HookOrder
 
+from .core import commands as _commands
 from .core import config as _config
 from .core import text as _text
 from .core import timeout as _timeout
@@ -88,6 +89,7 @@ from .core.constants import (
     _TIMBRE_MAX_GAIN_DB,
     _TTL_CACHE_MAX_ENTRIES,
     PRESET_ALIASES,
+    PRESET_DIR_NAME,
     PRESET_DISPLAY_NAMES,
     PRESET_REFERENCE_FILES,
     PRESET_REFERENCE_NAMES,
@@ -151,6 +153,10 @@ class MiMoVoicePlugin(MaiBotPlugin):
         self._synthesis_slots = asyncio.Semaphore(1)
         # 被 @ / 点名后的一次性优先窗口（只在 trigger.mention_priority 打开时记录）
         self._mention_priority = _trigger.MentionPriority()
+        # 命令层（0.5.5）：会话级开关（进程内，重启复位）与近期合成样本
+        self._session_switch: Dict[str, bool] = {}
+        self._recent_durations: List[float] = []
+        self._synth_stats = {"ok": 0, "timeout": 0, "failed": 0}
 
     # ------------------------------------------------------------------ 生命周期
 
@@ -331,6 +337,14 @@ class MiMoVoicePlugin(MaiBotPlugin):
         for candidate in candidates:
             resolved = candidate.resolve()
             if resolved.is_file():
+                if resolved.parent.name != PRESET_DIR_NAME:
+                    # 商店审核（#1256）建议：旧布局还能读，但升级后给一次迁移提示
+                    self._warn_once(
+                        f"preset:layout:{resolved.name}",
+                        "音色文件 %s 还在旧布局（插件根目录），建议移到 %s/ 下；当前版本仍会读取",
+                        resolved.name,
+                        PRESET_DIR_NAME,
+                    )
                 return resolved
         return None
 
@@ -970,6 +984,7 @@ class MiMoVoicePlugin(MaiBotPlugin):
         try:
             payload = await asyncio.wait_for(self._synthesize(text), timeout=timeout)
         except asyncio.TimeoutError as exc:
+            self._synth_stats["timeout"] += 1
             self.ctx.logger.warning(
                 "语音合成失败（类型=timeout，耗时 %.2fs，timeout %.1fs，第 %d 次，%d 字）",
                 time.monotonic() - started,
@@ -979,6 +994,7 @@ class MiMoVoicePlugin(MaiBotPlugin):
             )
             raise TimeoutError(f"语音合成超时（{timeout:.0f}s）") from exc
         except Exception as exc:
+            self._synth_stats["failed"] += 1
             self.ctx.logger.warning(
                 "语音合成失败（类型=%s，耗时 %.2fs，timeout %.1fs，第 %d 次，%d 字）：%s",
                 _timeout.classify_failure(exc),
@@ -990,6 +1006,9 @@ class MiMoVoicePlugin(MaiBotPlugin):
             )
             raise
         elapsed = time.monotonic() - started
+        self._synth_stats["ok"] += 1
+        self._recent_durations.append(elapsed)
+        del self._recent_durations[:-20]
         seconds = _payload_seconds(payload)
         audio_text = f"{seconds:.2f}s" if seconds is not None else "未知"
         self.ctx.logger.info(
@@ -1221,6 +1240,9 @@ class MiMoVoicePlugin(MaiBotPlugin):
         """
         if scope not in ("group", "private"):
             return False, "scope", 0.0
+        if self._session_switch.get(stream_id) is False:
+            # /voice off 只影响这个会话，进程内有效；没设过的会话按开启算
+            return False, "off", 0.0
         if not self._filter_allows(scope, group_id, user_id):
             return False, "filter", 0.0
         mode = self.config.trigger.mode
@@ -1431,6 +1453,291 @@ class MiMoVoicePlugin(MaiBotPlugin):
         self._prune_ttl_cache(self._llm_voice_requests)
         self._text_override_sessions.pop(stream_id, None)
         return {"success": True, "content": "这一轮会用语音回复，正常给出回复内容即可。"}
+
+    # ---------------------------------------------------------- 手动命令（0.5.5）
+
+    @Command(
+        "voice",
+        description="MiMo 语音手动命令：/voice on|off|test|status|help|say（仅私聊、仅管理员）",
+        pattern=r"^/(?:voice|vc)(?:\s+.*)?$",
+    )
+    async def handle_voice_command(self, **kwargs: Any) -> Tuple[bool, Optional[str], int]:
+        """处理 ``/voice`` 与 ``/vc``。
+
+        权限不交给宿主的 ``operator``：那套白名单在宿主配置里，插件拿不到多管理员列表。
+        这里自己判 ``commands.admins``（可写 ``10000002`` 或 ``qq:10000002``），失败也给回执。
+        命令只在私聊生效——群里的 ``/voice`` 按普通消息处理，避免在群里刷屏。
+        """
+        parsed = _commands.parse_command(str(kwargs.get("text") or ""))
+        if parsed is None or not self.config.commands.enabled:
+            return True, None, 0
+
+        stream_id = str(kwargs.get("stream_id") or "").strip()
+        group_id = str(kwargs.get("group_id") or "").strip()
+        user_id = str(kwargs.get("user_id") or "").strip()
+        platform = str(kwargs.get("platform") or "qq").strip() or "qq"
+
+        if group_id:
+            if stream_id:
+                await self._command_reply(stream_id, "这些命令只在私聊里可用，请私聊我。")
+            return True, None, 1
+
+        if not _commands.admin_matches(user_id, platform, self.config.commands.admins):
+            denied = (
+                "还没有配置管理员：请把 QQ 号填进 commands.admins（可填多个）。"
+                if not self.config.commands.admins
+                else "你没有权限使用这些命令。"
+            )
+            if stream_id:
+                await self._command_reply(stream_id, denied)
+            return True, None, 1
+
+        sub, rest = parsed
+        if sub in ("", "help"):
+            if stream_id:
+                await self._command_reply(stream_id, _commands.render_help())
+        elif sub in ("on", "off"):
+            if stream_id:
+                await self._command_switch(stream_id, group_id, user_id, sub == "on")
+        elif sub == "status":
+            if stream_id:
+                snapshot = self._status_snapshot(stream_id, group_id, user_id)
+                await self._command_reply(stream_id, _commands.render_status(snapshot))
+        elif sub == "test":
+            if stream_id:
+                await self._command_test(stream_id, rest)
+        elif sub == "say":
+            if stream_id:
+                await self._command_say(stream_id, rest, user_id, platform)
+        else:
+            if stream_id:
+                await self._command_reply(
+                    stream_id,
+                    f"不认识的子命令 {sub!r}。\n{_commands.render_help()}",
+                )
+        return True, None, 1
+
+    async def _command_reply(self, stream_id: str, text: str) -> None:
+        """命令回执必须自己发：宿主只把 handler 的 response 写日志，不会替我们发出去。"""
+        try:
+            await self.ctx.send.text(text, stream_id)
+        except Exception as exc:
+            self.ctx.logger.warning("命令回执发送失败（%s）", exc)
+
+    async def _command_switch(self, stream_id: str, group_id: str, user_id: str, enabled: bool) -> None:
+        # 没显式设置过时按开启算；所以首次 /voice on 回"已开启"，重复才回"本来就是开启的"
+        previous = self._session_switch.get(stream_id)
+        self._session_switch[stream_id] = enabled
+        label = self._session_label(stream_id, group_id=group_id, user_id=user_id)
+        state = "开启" if enabled else "关闭"
+        if previous == enabled:
+            await self._command_reply(stream_id, f"{label}语音本来就是{state}的")
+        else:
+            await self._command_reply(stream_id, f"{label}语音已{state}")
+
+    def _session_label(self, stream_id: str, *, group_id: str = "", user_id: str = "") -> str:
+        """给回执用的会话名：群 123 / QQ 10000002；缓存里没有就退回简易标签。"""
+        cached = self._lookup_scope(stream_id)
+        group_id = group_id or cached.get("group_id", "")
+        user_id = user_id or cached.get("user_id", "")
+        if group_id:
+            return f"群 {group_id}"
+        if user_id:
+            return f"QQ {user_id}"
+        return f"会话 {stream_id[:12]}"
+
+    def _command_prepare_text(self, raw: str) -> Tuple[Optional[str], str]:
+        """命令文本的清洗与长度校验：超限直接拒绝，不静默截断。"""
+        text = (raw or "").strip()
+        if not text:
+            return None, ""
+        limit = min(
+            int(self.config.commands.test_max_chars),
+            int(self.config.general.max_text_length),
+        )
+        if len(text) > limit:
+            return None, f"文本太长（{len(text)} 字，上限 {limit} 字）。"
+        prepared = self._sanitize_for_tts(text)
+        if not prepared:
+            return None, "这段文本没有可朗读的内容。"
+        return prepared, ""
+
+    async def _command_synthesize(self, prepared: str) -> Tuple[bytes, str]:
+        """合成并后处理；返回 ``(音频字节, 错误文案)``，两者必有其一为空。"""
+        try:
+            audio = await self._synthesize_guarded(prepared)
+        except _SynthesisBusy:
+            return b"", "正在合成上一条语音，请稍后再试。"
+        except Exception as exc:
+            reason = str(exc)
+            if reason.startswith("语音合成失败: "):
+                reason = reason[len("语音合成失败: ") :]
+            return b"", f"语音合成失败：{reason}。可发 /voice status 查看状态。"
+        try:
+            audio = await asyncio.to_thread(self._postprocess, audio)
+        except Exception as exc:  # pragma: no cover - 后处理失败不该阻断命令
+            self._warn_once("post:command", "语音后处理失败（%s），本条按原样发出", exc)
+        return audio, ""
+
+    async def _command_test(self, stream_id: str, raw: str) -> None:
+        prepared, error = self._command_prepare_text(raw)
+        if error:
+            await self._command_reply(stream_id, error)
+            return
+        if not prepared:
+            await self._command_reply(stream_id, f"用法：{_commands.usage_of('test')}")
+            return
+        audio, error = await self._command_synthesize(prepared)
+        if error:
+            await self._command_reply(stream_id, error)
+            return
+        if not await self._send_voice(stream_id, audio):
+            await self._command_reply(stream_id, "语音发送失败，详细原因见日志。")
+
+    async def _command_say(self, stream_id: str, rest: str, user_id: str, platform: str) -> None:
+        target, raw_text = _commands.split_target_and_text(rest)
+        if not target or not raw_text:
+            await self._command_reply(stream_id, f"用法：{_commands.usage_of('say')}")
+            return
+        kind, ident = _commands.parse_target(target)
+        if not ident:
+            await self._command_reply(stream_id, f"用法：{_commands.usage_of('say')}")
+            return
+        if not _commands.target_allowed(ident, kind, self.config.commands.say_targets):
+            await self._command_reply(stream_id, f"目标 {ident} 不在 commands.say_targets 白名单里。")
+            return
+        if ident == user_id:
+            # 发给自己没有意义（这条私聊本来就能用 test），省一次合成
+            await self._command_reply(stream_id, "目标就是当前私聊，直接用 /voice test 即可。")
+            return
+
+        prepared, error = self._command_prepare_text(raw_text)
+        if error:
+            await self._command_reply(stream_id, error)
+            return
+        if not prepared:
+            await self._command_reply(stream_id, f"用法：{_commands.usage_of('say')}")
+            return
+
+        target_stream, actual_kind, error = await self._resolve_command_target(kind, ident, platform)
+        if error:
+            await self._command_reply(stream_id, error)
+            return
+        audio, error = await self._command_synthesize(prepared)
+        if error:
+            await self._command_reply(stream_id, error)
+            return
+        if not await self._send_voice(target_stream, audio):
+            await self._command_reply(stream_id, "语音发送失败，详细原因见日志。")
+            return
+        label = "群" if actual_kind == "group" else "私聊"
+        seconds = _payload_seconds(audio)
+        suffix = f"（语音 {seconds:.1f}s）" if seconds is not None else ""
+        await self._command_reply(stream_id, f"已发送到{label} {ident}{suffix}")
+
+    async def _resolve_command_target(
+        self, kind: Optional[str], ident: str, platform: str
+    ) -> Tuple[str, str, str]:
+        """按「活跃会话 → 新建会话」解析目标，群与私聊都试；返回 ``(stream_id, kind, 错误)``。"""
+        candidates = [kind] if kind else ["group", "private"]
+        for candidate in candidates:
+            target = await self._lookup_stream(str(candidate), ident, platform)
+            if target:
+                return target, str(candidate), ""
+        for candidate in candidates:
+            target = await self._open_stream(str(candidate), ident, platform)
+            if target:
+                return target, str(candidate), ""
+        return (
+            "",
+            "",
+            f"找不到目标 {ident}：既不是活跃群/私聊，也无法新建会话。可用 g{ident} / u{ident} 指定类型。",
+        )
+
+    async def _lookup_stream(self, kind: str, ident: str, platform: str) -> str:
+        try:
+            if kind == "group":
+                result = await self.ctx.chat.get_stream_by_group_id(ident, platform)
+            else:
+                result = await self.ctx.chat.get_stream_by_user_id(ident, platform)
+        except Exception as exc:
+            self.ctx.logger.warning("命令查找会话失败（%s）", exc)
+            return ""
+        return _stream_session_id(result)
+
+    async def _open_stream(self, kind: str, ident: str, platform: str) -> str:
+        try:
+            if kind == "group":
+                result = await self.ctx.chat.open_session(
+                    platform=platform, chat_type="group", group_id=ident
+                )
+            else:
+                result = await self.ctx.chat.open_session(
+                    platform=platform, chat_type="private", user_id=ident
+                )
+        except Exception as exc:
+            self.ctx.logger.warning("命令新建会话失败（%s）", exc)
+            return ""
+        return _stream_session_id(result)
+
+    async def _send_voice(self, stream_id: str, audio: bytes) -> bool:
+        segment = {
+            "type": VOICE_SEGMENT_TYPE,
+            "data": "",
+            "hash": hashlib.sha256(audio).hexdigest(),
+            "binary_data_base64": base64.b64encode(audio).decode("ascii"),
+        }
+        try:
+            await self.ctx.send.hybrid(segments=[segment], stream_id=stream_id)
+        except Exception as exc:
+            self.ctx.logger.warning("命令语音发送失败（%s）", exc)
+            return False
+        return True
+
+    def _status_snapshot(self, stream_id: str, group_id: str, user_id: str) -> _commands.StatusSnapshot:
+        trigger = self.config.trigger
+        reference = "未找到参考音频"
+        try:
+            path = self._reference_path()
+        except Exception:  # pragma: no cover - 兜底
+            path = None
+        if path is not None:
+            reference = path.name
+        return _commands.StatusSnapshot(
+            version=str(self.config.plugin.config_version),
+            preset=str(self.config.voice.preset),
+            reference=reference,
+            mode=str(trigger.mode),
+            probability=float(trigger.probability),
+            short_reply_max_chars=int(trigger.short_reply_max_chars),
+            english_policy=str(trigger.english_policy),
+            timeout=float(self.config.general.timeout),
+            max_concurrent=int(self.config.mimo.max_concurrent),
+            mention_enabled=bool(trigger.mention_priority),
+            mention_probability=float(trigger.mention_probability),
+            emotion_enabled=bool(trigger.emotion_weighting),
+            emotion_step=float(trigger.emotion_step),
+            emotion_cap=float(trigger.emotion_cap),
+            session_on=self._session_switch.get(stream_id, True),
+            session_label=self._session_label(stream_id, group_id=group_id, user_id=user_id),
+            synth_ok=self._synth_stats["ok"],
+            synth_timeout=self._synth_stats["timeout"],
+            synth_failed=self._synth_stats["failed"],
+            durations=tuple(self._recent_durations),
+        )
+
+
+def _stream_session_id(result: Any) -> str:
+    """从 ``get_stream_*`` / ``open_session`` 的返回里挖出 session_id。"""
+    if not isinstance(result, dict):
+        return ""
+    stream = result.get("stream")
+    if isinstance(stream, dict):
+        value = stream.get("session_id") or stream.get("stream_id")
+        return str(value or "").strip()
+    value = result.get("session_id") or result.get("stream_id")
+    return str(value or "").strip()
+
 
 def create_plugin() -> MiMoVoicePlugin:
     return MiMoVoicePlugin()

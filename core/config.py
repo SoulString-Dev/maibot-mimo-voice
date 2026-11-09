@@ -32,7 +32,7 @@ class PluginSectionConfig(PluginConfigBase):
     __ui_label__ = "基础设置"
 
     enabled: bool = Field(default=True, description="是否启用语音回复")
-    config_version: str = Field(default="0.5.4", description="配置文件版本号（内部使用，无需修改）")
+    config_version: str = Field(default="0.5.5", description="配置文件版本号（内部使用，无需修改）")
 
 
 class GeneralConfig(PluginConfigBase):
@@ -158,6 +158,34 @@ class FilterConfig(PluginConfigBase):
         default_factory=list,
         description="私聊对方的 QQ 号列表（配合 private_mode 使用）",
         json_schema_extra={"placeholder": "例如: 10000002"},
+    )
+
+
+class CommandsConfig(PluginConfigBase):
+    """``/voice``、``/vc`` 手动命令（0.5.5 起）"""
+
+    __ui_label__ = "命令"
+
+    enabled: bool = Field(
+        default=True,
+        description="是否响应 /voice 与 /vc 命令；关掉后这两条消息按普通聊天处理",
+    )
+    admins: List[str] = Field(
+        default_factory=list,
+        description="允许使用命令的账号列表，可填多个：QQ 号（10000002）或带平台的写法（qq:10000002）；"
+        "留空表示谁都不能用（命令会回「未配置管理员」）",
+        json_schema_extra={"placeholder": "例如: 10000002"},
+    )
+    test_max_chars: int = Field(
+        default=200,
+        ge=1,
+        le=1000,
+        description="test / say 一次最多朗读多少字；超过直接拒绝，不会静默截断",
+    )
+    say_targets: List[str] = Field(
+        default_factory=list,
+        description="say 允许发送的目标白名单（群号或 QQ 号，也可写 g群号 / uQQ号）；留空表示任意目标",
+        json_schema_extra={"placeholder": "例如: 123456789"},
     )
 
 
@@ -336,6 +364,7 @@ class MiMoVoiceConfig(PluginConfigBase):
     voice: VoiceConfig = Field(default_factory=VoiceConfig)
     mimo: MiMoConfig = Field(default_factory=MiMoConfig)
     delivery: DeliveryConfig = Field(default_factory=DeliveryConfig)
+    commands: CommandsConfig = Field(default_factory=CommandsConfig)
 
 
 # `from __future__ import annotations` 让 pydantic 收到字符串注解：统一在这里重建一次，

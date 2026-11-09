@@ -40,6 +40,10 @@ defaults = {
     "peak_normalize": config.delivery.peak_normalize,
     "api_base_url": config.mimo.api_base_url,
     "allow_private_base_url": config.mimo.allow_private_base_url,
+    "commands_enabled": config.commands.enabled,
+    "commands_admins": config.commands.admins,
+    "commands_test_max_chars": config.commands.test_max_chars,
+    "commands_say_targets": config.commands.say_targets,
 }
 expected = {
     "mode": "random_llm",
@@ -62,6 +66,10 @@ expected = {
     "peak_normalize": True,
     "api_base_url": "https://api.xiaomimimo.com/v1",
     "allow_private_base_url": False,
+    "commands_enabled": True,
+    "commands_admins": [],
+    "commands_test_max_chars": 200,
+    "commands_say_targets": [],
 }
 for key, want in expected.items():
     checker.equal(f"默认 {key}", defaults[key], want)
@@ -137,7 +145,7 @@ checker.equal("manifest 版本", manifest["version"], config.plugin.config_versi
 checker.equal("模板 config_version", template["plugin"]["config_version"], config.plugin.config_version)
 checker.equal("sdk 上限不含 99 后缀", manifest["sdk"]["max_version"], "2.12.99")
 checker.check("模板键集合包含模型全部字段", set(template.keys()) == {
-    "plugin", "general", "trigger", "filters", "voice", "mimo", "delivery"
+    "plugin", "general", "trigger", "filters", "voice", "mimo", "delivery", "commands"
 }, f"{sorted(template.keys())}")
 
 sys.exit(checker.report())
