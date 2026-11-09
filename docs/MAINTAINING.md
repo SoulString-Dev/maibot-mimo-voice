@@ -4,7 +4,7 @@
 >
 > 已确认的上游限制：MiMo 每个账号的 TTS 并发名额只有 1，客户端超时后服务端仍在生成（探针最长 72.7 秒），超时后重发必 429（0.3–0.5 秒内被拒）。所以「重发」「自适应等更久」都不再有意义，见 `maibot-voice/docs/analysis-dual-draft.md` 与 README 的「429 与超时」。
 >
-> 0.5.5 已实现命令层（`/voice|/vc` 的 `on` / `off` / `test` / `status` / `say` / `help`，**只在私聊、只对 `commands.admins` 生效**，方案与实现见 `maibot-voice/docs/commands-0.5.5.md`）：本地 228 条测试全绿，未部署未打 tag。触发词引擎与两个加权仍留 0.5.6（默认关）。再往后 0.6.0 原计划 = 纯 Python 参考烘焙 + `voice.pitch` 三档（音高改造在 10-31 实测失败，见 `docs/roadmap.md` B9，是否照做待重估）；熔断仍未做，等失败簇数据。
+> 0.5.5 已实现命令层（`/voice|/vc` 的 `on` / `off` / `test` / `status` / `say` / `help`，**只在私聊、只对 `commands.admins` 生效**，方案与实现见 `maibot-voice/docs/commands-0.5.5.md`）：228 条测试全绿，11-09 22:53 已铺 NAS（`plugin.py` `0069d7ed…`），命令、超时、合成队列实测正常。触发词引擎与两个加权仍留 0.5.6（默认关）。再往后 0.6.0 原计划 = 纯 Python 参考烘焙 + `voice.pitch` 三档（音高改造在 10-31 实测失败，见 `docs/roadmap.md` B9，是否照做待重估）；熔断仍未做，等失败簇数据。
 
 ## 1. 这是什么，在哪
 
