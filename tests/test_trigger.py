@@ -55,11 +55,14 @@ def decide(text: str, stream: str = "sess-1"):
     return plugin._should_convert(text, stream, "group", "123456", "10000002")
 
 
-# 默认关：点名与情绪都不生效
+# 关掉点名优先时，点名标记不生效
+plugin.__dict__["_plugin_config_instance"] = module.MiMoVoiceConfig(
+    trigger={"mention_priority": False, "mention_probability": 1.0, "probability": 0.0}
+)
 plugin._mention_priority.record("sess-1", 90.0)
 converted, reason, _ = decide("好的呀")
-checker.equal("默认关时点名不生效", reason in ("random", "miss"), True)
-checker.check("默认关时来源仍是随机", reason in ("random", "miss"), reason)
+checker.equal("点名关时不生效", converted, False)
+checker.check("点名关时来源不是 mention", reason != "mention", reason)
 plugin._mention_priority.clear()
 
 # 打开点名：概率固定抬到 1.0 便于断言（mention_probability 上限 1.0）

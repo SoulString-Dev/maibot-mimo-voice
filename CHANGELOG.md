@@ -12,11 +12,13 @@ README 只保留最新一版的要点。
 - **窗口与限流**：窗口 = `general.timeout + 10` 秒（默认 35 秒），过期作废；同会话 5 秒内只记一次；命令消息（以 `/` 或 `／` 开头）不参与匹配。
 - **来源埋点**：成功日志新增 `来源=trigger:<词>`，`mai-tools/source_breakdown.py` 可按它统计。
 - **`/voice status`** 新增触发词一段：是否启用、窗口秒数、已配置条目（前 5 条）。
+- **默认带一条触发词**「用语音 / 任意」：装好即可用，可在设置页增删。
 
 ### 修改
 
 - 触发词优先于短句上限与「随机需纯中文」，但受放行规则与 `/voice off` 约束；合成失败/超时/忙时静默回退文字。
 - `plugin.config_version` 升到 0.5.6；`config.example.toml` 新增 `[triggers]` 段（含 `[[triggers.rules]]` 示例）。
+- **点名优先与情绪加权改为默认开**（`trigger.mention_priority` / `trigger.emotion_weighting`）：线上两周观察这两个加权表现稳定，不再需要手动开启。
 - **去掉 `commands.say_targets`**：不再限制 `/voice say` 的目标（改由 `commands.admins` 控制谁能用）；旧配置里残留这个键会被忽略。
 - **`commands.admins` 启动校验**：写成昵称、带空格等永远匹配不到的条目会告警并跳过；全是无效条目时提示「没有可用的账号」。
 - **`/voice status` 补失败类型分布**：失败次数后面带上分类计数（如 `429×2、network×1`），来自进程内统计。
@@ -42,8 +44,8 @@ README 只保留最新一版的要点。
 
 ### 新增
 
-- **点名优先**（`trigger.mention_priority`，默认关）：被 @ 或文本里点到 bot 的名字后，把**下一次**回复的语音概率抬到 `mention_probability`（默认 0.6，与 `probability` 取较大值）；用掉即清，没用到在 `mention_ttl_seconds`（90 秒）后作废，@所有人不算点名。点名那一次跳过 `random_requires_chinese`（用户点名就是想听声音），但英文仍按 `english_policy` 清洗，短句上限照旧生效。
-- **情绪加权**（`trigger.emotion_weighting`，默认关）：回复里出现感叹号、连续问号、波浪号、省略号、叠字、拟声词、emoji 时按项加分（每项 `emotion_step` = 0.04，最多 `emotion_cap` = 0.2）；只抬概率，不改写文本。判定用**清洗前**的原始回复：`sanitize_for_tts` 会把 `？？` 折成 `？`、`～`/`…` 折成逗号、emoji 删掉，所以「问句 / 波浪号 / 省略号 / emoji」四类规则在用清洗后的文本判断时**永远无法命中**。「感叹 / 叠字 / 拟声」三类不受影响——11-05 → 11-07 的 73 条语音里 `来源=emotion` 已有 13 条（12 条感叹 + 1 条拟声），本次修复是把剩下四类接上。
+- **点名优先**（`trigger.mention_priority`，0.5.6 起默认开）：被 @ 或文本里点到 bot 的名字后，把**下一次**回复的语音概率抬到 `mention_probability`（默认 0.6，与 `probability` 取较大值）；用掉即清，没用到在 `mention_ttl_seconds`（90 秒）后作废，@所有人不算点名。点名那一次跳过 `random_requires_chinese`（用户点名就是想听声音），但英文仍按 `english_policy` 清洗，短句上限照旧生效。
+- **情绪加权**（`trigger.emotion_weighting`，0.5.6 起默认开）：回复里出现感叹号、连续问号、波浪号、省略号、叠字、拟声词、emoji 时按项加分（每项 `emotion_step` = 0.04，最多 `emotion_cap` = 0.2）；只抬概率，不改写文本。判定用**清洗前**的原始回复：`sanitize_for_tts` 会把 `？？` 折成 `？`、`～`/`…` 折成逗号、emoji 删掉，所以「问句 / 波浪号 / 省略号 / emoji」四类规则在用清洗后的文本判断时**永远无法命中**。「感叹 / 叠字 / 拟声」三类不受影响——11-05 → 11-07 的 73 条语音里 `来源=emotion` 已有 13 条（12 条感叹 + 1 条拟声），本次修复是把剩下四类接上。
 - **触发来源埋点**：成功行追加 `来源=random|mention|emotion(标签)|llm_request|voice_only|llm_trigger，概率=0.15`；`core/trigger.py` 的规则与窗口独立可测。
 - **埋点补字数与音频时长**：成功行变成 `语音合成耗时：3.42s（timeout 25.0s，第 1 次，12 字，音频 3.33s）`，失败行补 `，12 字`。0.5.3 复盘时只有耗时、没有字数，只能拿相邻事件硬配，样本对不齐（75 对里相关系数 0.065，等于白算）。
 - 新增 `tests/test_trigger.py`（情绪规则、一次性窗口与过期、点名/短句/英文的交互、确定性模式）。

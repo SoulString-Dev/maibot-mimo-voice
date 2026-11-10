@@ -116,17 +116,17 @@ english_policy = "strip_tics"
 # 随机触发时，清洗后仍含英文字母就改发文字，避免把 token 念成字母。
 # 模型主动请求语音时不受此项影响；被 @ / 点名的那一次也不受此项限制（英文仍按 english_policy 清洗）。
 random_requires_chinese = true
-# ---- 点名优先（默认关）----
+# ---- 点名优先（默认开）----
 # 被 @ 或文本里点到 bot 的名字后，把"下一次"回复的语音概率抬到 mention_probability；
 # 用掉即清，没用到就在 mention_ttl_seconds 后作废（@所有人不算点名）。
-mention_priority = false
+mention_priority = true
 mention_probability = 0.6
 mention_ttl_seconds = 90.0
-# ---- 情绪加权（默认关）----
+# ---- 情绪加权（默认开）----
 # 回复里出现感叹号、连续问号、波浪号、省略号、叠字、拟声词、emoji 时按项加分，
 # 每项 emotion_step、最多 emotion_cap；只抬概率，不做任何文本改写。
 # 判定用的是清洗前的原始回复：朗读清洗会把「？？」折成「？」、把「～」「…」折成逗号、删掉 emoji。
-emotion_weighting = false
+emotion_weighting = true
 emotion_step = 0.04
 emotion_cap = 0.2
 
@@ -161,11 +161,10 @@ test_max_chars = 200
 enabled = true
 # 每条规则两个字段：word = 触发词（按字面匹配，不写正则）；mode = 出现位置。
 # mode 可选「任意」「头」「尾」：任意=文本任何位置；头=开头；尾=结尾（首尾标点会被忽略）。
-# 例：
-# [[triggers.rules]]
-# word = "用语音"
-# mode = "任意"
-rules = []
+# 默认带一条「用语音 / 任意」，可自行增删：
+[[triggers.rules]]
+word = "用语音"
+mode = "任意"
 
 [general]
 # ---- 长度与超时 ----

@@ -44,7 +44,16 @@ checker.equal("哥哥都不中", triggers.match_rules("今天天气不错", rule
 # ---------------------------------------------------------------- 配置模型
 config = config_module.MiMoVoiceConfig()
 checker.equal("默认开启", config.triggers.enabled, True)
-checker.equal("默认没有规则", list(config.triggers.rules), [])
+checker.equal(
+    "默认带一条用语音规则",
+    [(r.word, r.mode) for r in config.triggers.rules],
+    [("用语音", "任意")],
+)
+checker.equal(
+    "显式清空后没有规则",
+    list(config_module.MiMoVoiceConfig(triggers={"rules": []}).triggers.rules),
+    [],
+)
 rule = config_module.TriggerWordRule(word="  用语音 ", mode="head")
 checker.equal("词去掉首尾空格", rule.word, "用语音")
 checker.equal("位置归一成中文", rule.mode, "头")

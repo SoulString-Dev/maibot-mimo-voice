@@ -101,8 +101,8 @@ class TriggerConfig(PluginConfigBase):
         "模型主动要语音、llm_trigger、voice_only 不受此限制；点名那一次也不受限制",
     )
     mention_priority: bool = Field(
-        default=False,
-        description="被 @ 或点名后提高这一次回复的语音概率（默认关）；只对下一次出站回复生效，"
+        default=True,
+        description="被 @ 或点名后提高这一次回复的语音概率（默认开）；只对下一次出站回复生效，"
         "超过 mention_ttl_seconds 自动作废",
     )
     mention_probability: float = Field(
@@ -118,9 +118,9 @@ class TriggerConfig(PluginConfigBase):
         description="点名优先的有效期（秒）：下一次回复用掉即清，没用到就到期作废",
     )
     emotion_weighting: bool = Field(
-        default=False,
+        default=True,
         description="按回复文本的情绪标记（感叹号、连续问号、波浪号、省略号、叠字、拟声词、emoji）"
-        "给抽签概率加分（默认关）；判定看清洗前的原始回复，清洗过程会折掉大部分标记",
+        "给抽签概率加分（默认开）；判定看清洗前的原始回复，清洗过程会折掉大部分标记",
     )
     emotion_step: float = Field(
         default=0.04,
@@ -178,8 +178,8 @@ class TriggerWordsConfig(PluginConfigBase):
         "私聊直接生效，群聊需要 @ 或点名",
     )
     rules: List[TriggerWordRule] = Field(
-        default_factory=list,
-        description="群聊里 @ 机器人（或被点名）后，文本命中任意一条就让这次的回复变成语音",
+        default_factory=lambda: [TriggerWordRule(word="用语音", mode="任意")],
+        description="群聊里 @ 机器人（或被点名）后，文本命中任意一条就让这次的回复变成语音；默认带一条「用语音」",
         json_schema_extra={"label": "触发词列表", "min_items": 0, "max_items": 50},
     )
 

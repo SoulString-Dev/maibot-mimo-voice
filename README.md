@@ -109,7 +109,7 @@ reference_path = "我的音色.wav"
 - 同一聊天流在 `trigger.decision_ttl`（默认 10 秒）内复用上一次的抽签结果，避免连发多条时概率失真。
 - **默认概率 0.15**：低于 0.1 几乎察觉不到，想更频繁调到 0.25–0.4、想安静降到 0.05；再叠加下面两条过滤，实际出语音比例会略低于这个数。
 - `random_requires_chinese = true`（默认）时，随机抽中但清洗后仍含英文字母的改发文字（`token`、`LLM` 会被逐字母念）；模型主动请求、`llm_trigger`、`voice_only` 不受限制。两种模型工具只在对应模式下暴露。
-- 两个可选的加强项，**默认都关**：`trigger.mention_priority` 让被 @ / 点名后的下一条回复按 0.6 概率出声（一次性、90 秒过期，`@所有人` 不算）；`trigger.emotion_weighting` 让带感叹号、连续问号、波浪号、叠字、表情的回复按项加概率（每项 +0.04，最多 +0.2）。判定用**清洗前的原始回复**（清洗会把 `？？`、`～`、`…`、emoji 折掉），两者只影响抽签，不改写文本。
+- 两个加强项，**0.5.6 起默认都开**（不需要可在配置里关掉）：`trigger.mention_priority` 让被 @ / 点名后的下一条回复按 0.6 概率出声（一次性、90 秒过期，`@所有人` 不算）；`trigger.emotion_weighting` 让带感叹号、连续问号、波浪号、叠字、表情的回复按项加概率（每项 +0.04，最多 +0.2）。判定用**清洗前的原始回复**（清洗会把 `？？`、`～`、`…`、emoji 折掉），两者只影响抽签，不改写文本。
 
 ## 429 与超时
 
@@ -163,6 +163,8 @@ enabled = true
 word = "用语音"
 mode = "任意"   # 任意 / 头 / 尾
 ```
+
+默认已经带了一条「用语音 / 任意」，想加别的直接按行追加。
 
 - **不是正则**：`word` 按字面匹配，配置里只选位置——`任意`（文本任何地方）、`头`（开头，允许前面先有 `@昵称`）、`尾`（结尾，忽略首尾标点）。
 - 只决定「这一条回复用不用语音」：**不剥词、不改消息**，回复内容仍由模型正常生成。
@@ -225,10 +227,10 @@ private_mode = "all"
 | `trigger.overflow_policy` | `text` | 超长时：`text` 保留文字；`truncate` 截断后合成 |
 | `trigger.english_policy` | `strip_tics` | `keep` 原样念；`strip_tics` 只删复读口癖；`strip` 删所有拉丁串（会误伤真词） |
 | `trigger.random_requires_chinese` | `true` | 随机路径遇英文改发文字 |
-| `trigger.mention_priority` | `false` | 被 @ / 点名后抬高下一条回复的语音概率 |
+| `trigger.mention_priority` | `true` | 被 @ / 点名后抬高下一条回复的语音概率 |
 | `trigger.mention_probability` | `0.6` | 点名那一次的语音概率，与 `probability` 取较大值 |
 | `trigger.mention_ttl_seconds` | `90.0` | 点名优先的有效期（秒），用掉即清 |
-| `trigger.emotion_weighting` | `false` | 按情绪标记给抽签加分 |
+| `trigger.emotion_weighting` | `true` | 按情绪标记给抽签加分 |
 | `trigger.emotion_step` / `emotion_cap` | `0.04` / `0.2` | 每项加分与总上限 |
 | `delivery.trim_tail_silence_ms` | `250` | 尾部静音超过这个毫秒数就裁掉（只留 150ms），0 = 不裁 |
 | `delivery.tail_pad_ms` | `120` | 处理完后补多少毫秒尾静音，避免播放端吃掉最后一个字 |
@@ -237,7 +239,7 @@ private_mode = "all"
 | `commands.admins` | `[]` | 允许使用命令的账号（QQ 号或 `qq:ID`），可填多个；留空谁都不能用 |
 | `commands.test_max_chars` | `200` | `test` / `say` 单次最多朗读多少字，超过直接拒绝 |
 | `triggers.enabled` | `true` | 是否启用触发词（私聊直接生效，群聊需 @ 或点名） |
-| `triggers.rules` | `[]` | 触发词规则：`word` + `mode`（任意 / 头 / 尾） |
+| `triggers.rules` | 一条：`用语音` / `任意` | 触发词规则：`word` + `mode`（任意 / 头 / 尾） |
 | `filters.group_mode` | `all` | 群聊放行：`all` / `whitelist` / `blacklist` |
 | `filters.private_mode` | `all` | 私聊放行：`all` / `whitelist` / `blacklist` |
 | `filters.group_ids` | `[]` | 群号列表 |
@@ -267,7 +269,7 @@ private_mode = "all"
 │   ├── trigger.py               # 点名窗口 / 情绪加分
 │   ├── timeout.py               # 失败归类
 │   └── commands.py              # /voice 解析与回执文案
-├── tests/                       # 280 条断言，不依赖 pytest
+├── tests/                       # 281 条断言，不依赖 pytest
 ├── config.example.toml
 ├── _manifest.json
 ├── assets/icon.svg              # 商店图标
@@ -346,7 +348,7 @@ private_mode = "all"
 ### 0.5.4
 
 - **一条语音只发一次请求，超时固定 25 秒**：删除 p80 自适应超时（`timeout_mode`）与超时补发（`retry_on_timeout`）。依据是 11-06 的名额实验：账号级 TTS 并发名额只有 1，超时后服务端仍在生成（最长 72.7 秒），补发必 429。
-- **点名优先 + 情绪加权**（默认关）：被 @ / 点名后下一条回复按 0.6 概率出声；带感叹号、叠字、表情的回复按项加概率（+0.04/项，上限 +0.2），判定看清洗前的原始回复。
+- **点名优先 + 情绪加权**（0.5.6 起默认开）：被 @ / 点名后下一条回复按 0.6 概率出声；带感叹号、叠字、表情的回复按项加概率（+0.04/项，上限 +0.2），判定看清洗前的原始回复。
 - **埋点补字数与音频时长**：成功行变成 `语音合成耗时：3.42s（timeout 25.0s，第 1 次，12 字，音频 3.33s）`，失败行补 `，12 字`。
 - **内置「可爱少女」参考换成原样 8.41 秒版**：A/B/C 实测原样版离群值最少（两句拼接版中位 7.10、最大 12.49 dB；单句中位 8.66），代价是每次多传约 220 KB。
 
@@ -363,7 +365,7 @@ python -c "import tomllib; tomllib.load(open('config.example.toml','rb'))"
 pip install -r requirements-dev.txt
 ruff check .
 mypy plugin.py core   # 需先装 maibot-plugin-sdk，否则基类被当作 Any，会漏掉 self.config 的类型问题
-python tests/run_all.py     # 文本/音频/配置/超时/触发/命令/触发词七组共 280 条断言
+python tests/run_all.py     # 文本/音频/配置/超时/触发/命令/触发词七组共 281 条断言
 ```
 
 Windows 上等价的一条命令：`pwsh -File tools/run_checks.ps1`（已处理控制台编码与临时目录的差异）。

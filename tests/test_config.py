@@ -44,17 +44,17 @@ defaults = {
     "commands_admins": config.commands.admins,
     "commands_test_max_chars": config.commands.test_max_chars,
     "triggers_enabled": config.triggers.enabled,
-    "triggers_rules": config.triggers.rules,
+    "triggers_rules": [(r.word, r.mode) for r in config.triggers.rules],
 }
 expected = {
     "mode": "random_llm",
     "probability": 0.15,
     "english_policy": "strip_tics",
     "random_requires_chinese": True,
-    "mention_priority": False,
+    "mention_priority": True,
     "mention_probability": 0.6,
     "mention_ttl_seconds": 90.0,
-    "emotion_weighting": False,
+    "emotion_weighting": True,
     "emotion_step": 0.04,
     "emotion_cap": 0.2,
     "decision_ttl": 10.0,
@@ -71,7 +71,7 @@ expected = {
     "commands_admins": [],
     "commands_test_max_chars": 200,
     "triggers_enabled": True,
-    "triggers_rules": [],
+    "triggers_rules": [("用语音", "任意")],
 }
 for key, want in expected.items():
     checker.equal(f"默认 {key}", defaults[key], want)
