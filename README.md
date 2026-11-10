@@ -10,6 +10,7 @@
 - 四种触发方式：随机抽签、随机 + 模型主动请求（默认）、语音优先、全量。
 - 群聊 / 私聊各自独立的 `all / whitelist / blacklist` 放行策略。
 - 管理员可私聊发 `/voice`（或 `/vc`）手动试听、查看状态、往指定群/QQ 发语音。
+- 触发词：群里 @ 机器人（或私聊）说「用语音」这类词，这条回复就改用语音，不改消息内容。
 - 合成前清洗文本（表情、引号、波浪号、省略号、重复标点），并用风格指令压住音色漂移；英文默认只删 `ww` / `emmm` 这类复读口癖，`LLM`、`token`、`cos` 等真词原样朗读。
 
 | 与上游的差异 | 原因 |
@@ -143,14 +144,32 @@ enabled = true
 # 可填多个：纯 QQ 号，或带平台的写法（qq:10000002）
 admins = ["10000002"]
 test_max_chars = 200
-# say 的目标白名单，留空表示任意目标
-say_targets = []
 ```
 
 - **只在私聊生效**：群里发 `/voice` 只会回一句"请私聊"，不会执行、也不会进模型。
 - 管理员列表留空时，命令会回「还没有配置管理员」，不会有人能用。
 - `/voice say` 先找活跃会话，找不到再尝试新建；两种都失败会明确报错，不会静默丢消息。
 - `test` / `say` 超过 `test_max_chars` 直接拒绝，不静默截断；命令回执是普通文字，不进模型上下文。
+
+## 触发词（0.5.6）
+
+群里 @ 机器人（或被点名）后，只要消息里出现配置的触发词，这条消息对应的回复就用语音；私聊不需要 @。
+
+```toml
+[triggers]
+enabled = true
+
+[[triggers.rules]]
+word = "用语音"
+mode = "任意"   # 任意 / 头 / 尾
+```
+
+- **不是正则**：`word` 按字面匹配，配置里只选位置——`任意`（文本任何地方）、`头`（开头，允许前面先有 `@昵称`）、`尾`（结尾，忽略首尾标点）。
+- 只决定「这一条回复用不用语音」：**不剥词、不改消息**，回复内容仍由模型正常生成。
+- 命中窗口从收到消息算起，等于 `general.timeout + 10` 秒（默认 25 → 35 秒）；窗口内没出回复就作废，不会把之后无关的回复变成语音。
+- 合成失败、超时、正在合成时，一律静默回退文字，不额外提示。
+- 同一条消息里命中多条规则时取第一条；命令消息（以 `/` 开头）不参与匹配。
+- 触发词优先于短句上限与「随机需纯中文」，但仍受放行规则与 `/voice off` 约束。
 
 ## 群聊 / 私聊过滤
 
@@ -165,7 +184,7 @@ private_mode = "all"
 
 `group_mode` 与 `private_mode` 都不是 `all` 时，插件会记录入站消息的群号 / 对方 QQ 号（`chat.receive.before_process`），出站时按名单判断；两者都是 `all` 时不记录，零额外开销。拿不到对方身份时（映射过期等）一律保持文字，不误放行。
 
-## 配置说明（共 47 项，日常只需动前 12 项）
+## 配置说明（共 48 项，日常只需动前 12 项）
 
 ### 基础
 
@@ -217,7 +236,8 @@ private_mode = "all"
 | `commands.enabled` | `true` | 是否响应 `/voice`、`/vc` 命令 |
 | `commands.admins` | `[]` | 允许使用命令的账号（QQ 号或 `qq:ID`），可填多个；留空谁都不能用 |
 | `commands.test_max_chars` | `200` | `test` / `say` 单次最多朗读多少字，超过直接拒绝 |
-| `commands.say_targets` | `[]` | `say` 的目标白名单，留空表示任意目标 |
+| `triggers.enabled` | `true` | 是否启用触发词（私聊直接生效，群聊需 @ 或点名） |
+| `triggers.rules` | `[]` | 触发词规则：`word` + `mode`（任意 / 头 / 尾） |
 | `filters.group_mode` | `all` | 群聊放行：`all` / `whitelist` / `blacklist` |
 | `filters.private_mode` | `all` | 私聊放行：`all` / `whitelist` / `blacklist` |
 | `filters.group_ids` | `[]` | 群号列表 |
@@ -247,7 +267,7 @@ private_mode = "all"
 │   ├── trigger.py               # 点名窗口 / 情绪加分
 │   ├── timeout.py               # 失败归类
 │   └── commands.py              # /voice 解析与回执文案
-├── tests/                       # 228 条断言，不依赖 pytest
+├── tests/                       # 280 条断言，不依赖 pytest
 ├── config.example.toml
 ├── _manifest.json
 ├── assets/icon.svg              # 商店图标
@@ -308,6 +328,14 @@ private_mode = "all"
 
 ## 更新日志
 
+### 0.5.6
+
+- **触发词**：群里 @ 机器人（或私聊）后，文本里出现触发词就让这条回复改用语音。规则只填「词 + 位置（任意 / 头 / 尾）」，按字面匹配、不写正则；不剥词、不改消息，失败照常回退文字。
+- 触发窗口 = `general.timeout + 10` 秒；同会话 5 秒内只记一次；命令消息不参与。
+- `/voice status` 新增触发词一段（是否启用、窗口、已配置条目），并补上失败类型分布（如 `429×2`）。
+- `/voice say` 不再限制目标白名单（`commands.say_targets` 已移除）：能进管理员列表的人就是可信的。
+- `commands.admins` 启动时会校验，写成昵称或带空格的条目会告警并跳过。
+
 ### 0.5.5
 
 - **手动命令层**：`/voice`（或 `/vc`）新增 `on` / `off` / `test` / `status` / `say` / `help`，全部仅私聊、仅管理员（`commands.admins` 可配多人，支持 `qq:ID` 写法）。`say` 可把语音发到指定群或 QQ，目标解析按「活跃会话 → 新建会话」依次尝试。
@@ -335,7 +363,7 @@ python -c "import tomllib; tomllib.load(open('config.example.toml','rb'))"
 pip install -r requirements-dev.txt
 ruff check .
 mypy plugin.py core   # 需先装 maibot-plugin-sdk，否则基类被当作 Any，会漏掉 self.config 的类型问题
-python tests/run_all.py     # 文本/音频/配置/超时/触发/命令六组共 228 条断言
+python tests/run_all.py     # 文本/音频/配置/超时/触发/命令/触发词七组共 280 条断言
 ```
 
 Windows 上等价的一条命令：`pwsh -File tools/run_checks.ps1`（已处理控制台编码与临时目录的差异）。

@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import re
 import statistics
 from dataclasses import dataclass, field
 from typing import Iterable, List, Optional, Sequence, Tuple
@@ -92,16 +93,21 @@ def parse_target(raw: str) -> Tuple[Optional[str], str]:
     return None, text
 
 
-def target_allowed(ident: str, kind: Optional[str], allow: Iterable[str]) -> bool:
-    """``commands.say_targets`` 白名单；留空表示任意目标。"""
-    entries = [str(item).strip() for item in allow if str(item).strip()]
-    if not entries:
-        return True
-    if ident in entries:
-        return True
-    if kind == "group" and f"g{ident}" in entries:
-        return True
-    return kind == "private" and f"u{ident}" in entries
+_ADMIN_ENTRY = re.compile(r"^(?:[A-Za-z][A-Za-z0-9_]*:)?[0-9]+$")
+
+
+def admin_entry_problem(entry: str) -> Optional[str]:
+    """检查 ``commands.admins`` 的一条；没问题返回 ``None``。
+
+    合法写法只有两种：纯数字账号，或 ``平台:账号``（``qq:10000002``）。写成昵称、
+    带空格、混中文都匹配不到人，启动时给一条告警比让人对着"没有权限"猜要好。
+    """
+    item = str(entry or "").strip()
+    if not item:
+        return "空条目"
+    if _ADMIN_ENTRY.fullmatch(item):
+        return None
+    return "应为数字账号，可以带平台前缀（如 qq:10000002）"
 
 
 def split_target_and_text(rest: str) -> Tuple[str, str]:
@@ -151,11 +157,16 @@ class StatusSnapshot:
     emotion_enabled: bool
     emotion_step: float
     emotion_cap: float
+    trigger_enabled: bool
+    trigger_ttl: float
+    trigger_rules: Sequence[str]
+    trigger_active: bool
     session_on: bool
     session_label: str
     synth_ok: int = 0
     synth_timeout: int = 0
     synth_failed: int = 0
+    synth_failures: Sequence[Tuple[str, int]] = field(default_factory=tuple)
     durations: Sequence[float] = field(default_factory=tuple)
 
 
@@ -187,14 +198,21 @@ def render_status(snapshot: StatusSnapshot) -> str:
             f"情绪开(+{snapshot.emotion_step:.2f}/上限{snapshot.emotion_cap:.2f})"
             if snapshot.emotion_enabled
             else "情绪关"
-        ),
+        )
+        + f" 触发词{'开' if snapshot.trigger_enabled else '关'}"
+        + (f"（{len(snapshot.trigger_rules)} 条）" if snapshot.trigger_rules else "（未配置）"),
         f"超时 {snapshot.timeout:.0f}s · 并发 {snapshot.max_concurrent} · 一条语音只发一次请求",
     ]
 
     stats = f"本会话{'已开启' if snapshot.session_on else '已关闭'}（{snapshot.session_label}）"
     stats += f" · 进程内合成 {snapshot.synth_ok} 次"
     if snapshot.synth_timeout or snapshot.synth_failed:
-        stats += f"（超时 {snapshot.synth_timeout}，失败 {snapshot.synth_failed}）"
+        stats += f"（超时 {snapshot.synth_timeout}，失败 {snapshot.synth_failed}"
+        if snapshot.synth_failures:
+            stats += "：" + "、".join(f"{kind}×{count}" for kind, count in snapshot.synth_failures)
+        stats += "）"
+    if snapshot.trigger_active:
+        stats += f" · 触发词已就绪（{snapshot.trigger_ttl:.0f}s 内有效）"
     median = _percentile(snapshot.durations, 0.5)
     p95 = _percentile(snapshot.durations, 0.95)
     if median is not None and p95 is not None:

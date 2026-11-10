@@ -17,14 +17,13 @@ import sys
 from pathlib import Path
 
 # 老版本里被写进 [plugin] 或别的段落的命令配置
-_COMMAND_KEYS = ("enabled", "admins", "test_max_chars", "say_targets")
+_COMMAND_KEYS = ("enabled", "admins", "test_max_chars")
 _COMMAND_SECTION = "commands"
 
 PREFERRED_BY_KEY = {
     "enabled": "plugin",
     "admins": "commands",
     "test_max_chars": "commands",
-    "say_targets": "commands",
 }
 
 

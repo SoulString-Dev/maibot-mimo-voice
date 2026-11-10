@@ -39,6 +39,7 @@ from .core import config as _config
 from .core import text as _text
 from .core import timeout as _timeout
 from .core import trigger as _trigger
+from .core import triggers as _triggers
 from .core.audio import (
     _apply_gain_curve,
     _concat_path,
@@ -87,6 +88,8 @@ from .core.constants import (
     _TAIL_KEEP_SECONDS,
     _TIMBRE_FULL_STRENGTH_DB,
     _TIMBRE_MAX_GAIN_DB,
+    _TRIGGER_MIN_INTERVAL_SECONDS,
+    _TRIGGER_TTL_MARGIN_SECONDS,
     _TTL_CACHE_MAX_ENTRIES,
     PRESET_ALIASES,
     PRESET_DIR_NAME,
@@ -157,6 +160,10 @@ class MiMoVoicePlugin(MaiBotPlugin):
         self._session_switch: Dict[str, bool] = {}
         self._recent_durations: List[float] = []
         self._synth_stats = {"ok": 0, "timeout": 0, "failed": 0}
+        self._synth_failures: Dict[str, int] = {}
+        # 触发词（0.5.6）：session_id -> (词, 位置, 过期时间)；命中只在出站消费一次
+        self._trigger_requests: Dict[str, Tuple[str, str, float]] = {}
+        self._trigger_last_hit: Dict[str, float] = {}
 
     # ------------------------------------------------------------------ 生命周期
 
@@ -167,6 +174,7 @@ class MiMoVoicePlugin(MaiBotPlugin):
         self._synthesis_slots = asyncio.Semaphore(max(1, int(self.config.mimo.max_concurrent)))
         if not self.config.mimo.api_key.strip():
             self.ctx.logger.warning("MiMo 语音插件未配置 api_key，所有回复将保持文字")
+        self._check_admin_entries()
         data_dir = self._data_dir()
         if data_dir is not None:
             try:
@@ -178,7 +186,7 @@ class MiMoVoicePlugin(MaiBotPlugin):
             "MiMo 语音插件已加载：音色=%s, mode=%s, probability=%.2f, 短句上限=%d字, 合成=%s, "
             "风格指令=%s, 参考策略=%s, 英文=%s, 随机需纯中文=%s, 超时=%.0fs, "
             "音色对齐=%s, 尾部裁剪=%dms, 尾部补静音=%dms, 峰值归一=%s, 群聊放行=%s, 私聊放行=%s, "
-            "点名优先=%s(%.2f), 情绪加权=%s(+%.2f/上限%.2f)",
+            "点名优先=%s(%.2f), 情绪加权=%s(+%.2f/上限%.2f), 触发词=%s",
             PRESET_DISPLAY_NAMES.get(self.config.voice.preset, self.config.voice.preset),
             self.config.trigger.mode,
             self.config.trigger.probability,
@@ -200,6 +208,11 @@ class MiMoVoicePlugin(MaiBotPlugin):
             "开" if self.config.trigger.emotion_weighting else "关",
             float(self.config.trigger.emotion_step),
             float(self.config.trigger.emotion_cap),
+            (
+                f"开({len(self._trigger_rules())} 条)"
+                if self.config.triggers.enabled and self.config.triggers.rules
+                else "关"
+            ),
         )
         if data_dir is not None:
             self.ctx.logger.info("参考音频目录：%s（自定义音色把文件放这里）", data_dir / "references")
@@ -995,9 +1008,11 @@ class MiMoVoicePlugin(MaiBotPlugin):
             raise TimeoutError(f"语音合成超时（{timeout:.0f}s）") from exc
         except Exception as exc:
             self._synth_stats["failed"] += 1
+            kind = _timeout.classify_failure(exc)
+            self._synth_failures[kind] = self._synth_failures.get(kind, 0) + 1
             self.ctx.logger.warning(
                 "语音合成失败（类型=%s，耗时 %.2fs，timeout %.1fs，第 %d 次，%d 字）：%s",
-                _timeout.classify_failure(exc),
+                kind,
                 time.monotonic() - started,
                 timeout,
                 attempt,
@@ -1169,6 +1184,85 @@ class MiMoVoicePlugin(MaiBotPlugin):
             float(self.config.trigger.mention_ttl_seconds),
         )
 
+    @HookHandler(
+        "chat.receive.after_process",
+        name="mimo_voice_remember_trigger",
+        description="文本命中触发词、且被 @ / 点名 / 私聊时，让这条消息对应的回复改用语音",
+        mode=HookMode.OBSERVE,
+        order=HookOrder.EARLY,
+    )
+    async def remember_trigger(self, message: Optional[Dict[str, Any]] = None, **kwargs: Any) -> None:
+        config = self.config.triggers
+        if not config.enabled or not config.rules:
+            return
+        payload = message if isinstance(message, dict) else {}
+        text = str(payload.get("processed_plain_text") or payload.get("plain_text") or "").strip()
+        if not text or text[0] in ("/", "／"):
+            # 命令消息与命令回执是两回事，别让 /voice test 之类的文本误触发
+            return
+        session_id = str(payload.get("session_id") or kwargs.get("stream_id") or "").strip()
+        if not session_id:
+            return
+        info = payload.get("message_info")
+        info = info if isinstance(info, dict) else {}
+        group_info = info.get("group_info")
+        group_info = group_info if isinstance(group_info, dict) else {}
+        group_id = str(group_info.get("group_id") or "").strip()
+        scope = str(payload.get("scope") or "").strip()
+        private = scope == "private" or (not group_id and scope != "group")
+        if not (private or payload.get("is_at") or payload.get("is_mentioned")):
+            return
+        rules = self._trigger_rules()
+        hit = _triggers.match_rules(text, rules)
+        if hit is None:
+            return
+        now = time.monotonic()
+        last = self._trigger_last_hit.get(session_id, 0.0)
+        if now - last < _TRIGGER_MIN_INTERVAL_SECONDS:
+            # 群里连发同一条/同一批消息时只记一次，避免刷屏
+            return
+        self._trigger_last_hit[session_id] = now
+        word, mode = hit
+        ttl = self._trigger_ttl()
+        self._trigger_requests[session_id] = (word, mode, now + ttl)
+        if len(self._trigger_requests) > _TTL_CACHE_MAX_ENTRIES:
+            self._trigger_requests = {
+                key: value for key, value in self._trigger_requests.items() if value[2] >= now
+            }
+        self.ctx.logger.info(
+            "会话 %s 命中触发词「%s」（位置=%s），这条回复改用语音（窗口 %.0fs）",
+            session_id,
+            word,
+            _triggers.mode_label(mode),
+            ttl,
+        )
+
+    def _trigger_rules(self) -> List[Tuple[str, str]]:
+        """把配置里的规则换成 ``(词, 位置)``；空词直接跳过。"""
+
+        rules: List[Tuple[str, str]] = []
+        for rule in self.config.triggers.rules:
+            word = str(getattr(rule, "word", "") or "").strip()
+            if not word:
+                continue
+            rules.append((word, _triggers.normalize_mode(getattr(rule, "mode", "")) or _triggers.MODE_ANY))
+        return rules
+
+    def _trigger_ttl(self) -> float:
+        """回复落地窗口：从收到消息算起，等于合成超时再留 10 秒。"""
+
+        return max(5.0, float(self.config.general.timeout) + _TRIGGER_TTL_MARGIN_SECONDS)
+
+    def _active_trigger(self, stream_id: str) -> Optional[Tuple[str, str]]:
+        entry = self._trigger_requests.get(stream_id)
+        if entry is None:
+            return None
+        word, mode, expires_at = entry
+        if expires_at < time.monotonic():
+            self._trigger_requests.pop(stream_id, None)
+            return None
+        return word, mode
+
     # ------------------------------------------------------------------- 触发
 
     def _stream_id(self, message: Dict[str, Any], kwargs: Dict[str, Any]) -> str:
@@ -1245,6 +1339,11 @@ class MiMoVoicePlugin(MaiBotPlugin):
             return False, "off", 0.0
         if not self._filter_allows(scope, group_id, user_id):
             return False, "filter", 0.0
+        # 触发词（0.5.6）：用户明确要求这一次用语音，优先于模式与抽签；
+        # 不受短句上限、英文策略约束，但要过放行规则与会话开关（上面两道）。
+        trigger_hit = self._active_trigger(stream_id)
+        if trigger_hit is not None:
+            return True, f"trigger:{trigger_hit[0]}", 1.0
         mode = self.config.trigger.mode
         if mode == "voice_only":
             return True, "voice_only", 1.0
@@ -1371,6 +1470,7 @@ class MiMoVoicePlugin(MaiBotPlugin):
         self._text_override_sessions.pop(stream_id, None)
         self._random_decisions.pop(stream_id, None)
         self._mention_priority.consume(stream_id)
+        self._trigger_requests.pop(stream_id, None)
         if had_reply:
             self.ctx.logger.info("QQ 语音不支持引用组合，已移除会话 %s 的引用段", stream_id)
         self.ctx.logger.info(
@@ -1603,9 +1703,6 @@ class MiMoVoicePlugin(MaiBotPlugin):
         if not ident:
             await self._command_reply(stream_id, f"用法：{_commands.usage_of('say')}")
             return
-        if not _commands.target_allowed(ident, kind, self.config.commands.say_targets):
-            await self._command_reply(stream_id, f"目标 {ident} 不在 commands.say_targets 白名单里。")
-            return
         if ident == user_id:
             # 发给自己没有意义（这条私聊本来就能用 test），省一次合成
             await self._command_reply(stream_id, "目标就是当前私聊，直接用 /voice test 即可。")
@@ -1694,6 +1791,26 @@ class MiMoVoicePlugin(MaiBotPlugin):
             return False
         return True
 
+    def _check_admin_entries(self) -> None:
+        """启动时提醒 ``commands.admins`` 里写错、永远匹配不到的条目。"""
+        entries = [str(item).strip() for item in self.config.commands.admins if str(item).strip()]
+        usable = 0
+        for entry in entries:
+            problem = _commands.admin_entry_problem(entry)
+            if problem is None:
+                usable += 1
+                continue
+            self._warn_once(
+                f"admins:{entry}",
+                "commands.admins 里的 %r 不可用（%s），这一项会被忽略",
+                entry,
+                problem,
+            )
+        if entries and usable == 0:
+            self.ctx.logger.warning(
+                "commands.admins 里没有可用的账号，所有 /voice 命令都会回「还没有配置管理员」"
+            )
+
     def _status_snapshot(self, stream_id: str, group_id: str, user_id: str) -> _commands.StatusSnapshot:
         trigger = self.config.trigger
         reference = "未找到参考音频"
@@ -1715,6 +1832,12 @@ class MiMoVoicePlugin(MaiBotPlugin):
             max_concurrent=int(self.config.mimo.max_concurrent),
             mention_enabled=bool(trigger.mention_priority),
             mention_probability=float(trigger.mention_probability),
+            trigger_enabled=bool(self.config.triggers.enabled),
+            trigger_ttl=self._trigger_ttl(),
+            trigger_rules=tuple(
+                f"{word}({_triggers.mode_label(mode)})" for word, mode in self._trigger_rules()
+            ),
+            trigger_active=self._active_trigger(stream_id) is not None,
             emotion_enabled=bool(trigger.emotion_weighting),
             emotion_step=float(trigger.emotion_step),
             emotion_cap=float(trigger.emotion_cap),
@@ -1723,6 +1846,9 @@ class MiMoVoicePlugin(MaiBotPlugin):
             synth_ok=self._synth_stats["ok"],
             synth_timeout=self._synth_stats["timeout"],
             synth_failed=self._synth_stats["failed"],
+            synth_failures=tuple(
+                sorted(self._synth_failures.items(), key=lambda item: (-item[1], item[0]))
+            ),
             durations=tuple(self._recent_durations),
         )
 

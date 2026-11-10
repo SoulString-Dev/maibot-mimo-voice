@@ -71,9 +71,11 @@ def test_build(module) -> int:
     check.equal("无前缀目标", commands.parse_target("123456"), (None, "123456"))
     check.equal("g 前缀", commands.parse_target("g123456"), ("group", "123456"))
     check.equal("u 前缀", commands.parse_target("U10000002"), ("private", "10000002"))
-    check.check("白名单留空放行", commands.target_allowed("1", "group", []))
-    check.check("白名单 g 前缀", commands.target_allowed("1", "group", ["g1"]))
-    check.check("白名单类型不符", not commands.target_allowed("1", "private", ["g1"]))
+    check.check("管理员纯 ID 合法", commands.admin_entry_problem("10000002") is None)
+    check.check("管理员 scoped 合法", commands.admin_entry_problem("qq:10000002") is None)
+    check.check("管理员写成昵称被拦", commands.admin_entry_problem("麦麦") is not None)
+    check.check("管理员带空格被拦", commands.admin_entry_problem("1000 0002") is not None)
+    check.check("管理员空条目被拦", commands.admin_entry_problem("  ") is not None)
     check.equal("拆目标与文本", commands.split_target_and_text("g123 你好 世界"), ("g123", "你好 世界"))
     return check.report()
 
@@ -125,9 +127,32 @@ def test_handler(module) -> int:
     # status
     call(plugin, "/voice status")
     status_text = plugin.ctx.send.texts[-1][1]
-    check.check("status 带版本", "v0.5.5" in status_text)
+    check.check("status 带版本", "v0.5.6" in status_text)
     check.check("status 带超时", "超时 25s" in status_text)
     check.check("status 带会话标签", "QQ 10000002" in status_text)
+
+    plugin._synth_stats["failed"] = 3
+    plugin._synth_failures = {"429": 2, "network": 1}
+    call(plugin, "/voice status")
+    status_text = plugin.ctx.send.texts[-1][1]
+    check.check("status 带失败类型分布", "失败 3：429×2、network×1" in status_text, status_text)
+    plugin._synth_stats["failed"] = 0
+    plugin._synth_failures = {}
+
+    mixed, _, mixed_log = make_ready(module, commands={"admins": ["麦麦", ADMIN]})
+    mixed._check_admin_entries()
+    check.check(
+        "admins 里写错的条目有告警",
+        any("麦麦" in text and "不可用" in text for _level, text in mixed_log.records),
+        mixed_log.records,
+    )
+    broken, _, broken_log = make_ready(module, commands={"admins": ["麦麦"]})
+    broken._check_admin_entries()
+    check.check(
+        "admins 全都不合法时给总告警",
+        any("没有可用的账号" in text for _level, text in broken_log.records),
+        broken_log.records,
+    )
 
     # test：空文本 / 超长 / 成功 / 忙
     call(plugin, "/voice test")
@@ -155,11 +180,6 @@ def test_handler(module) -> int:
     # say：发给自己 / 白名单 / 群 / 新建会话
     call(plugin, "/voice say " + ADMIN + " 你好")
     check.check("say 发给自己提示用 test", "/voice test" in plugin.ctx.send.texts[-1][1])
-
-    strict, _, _ = make_ready(module, commands={"say_targets": ["g999"]})
-    stub_synthesis(strict, wav_bytes(1.0))
-    call(strict, "/voice say 123456 你好")
-    check.check("say 白名单拦截", "不在 commands.say_targets" in strict.ctx.send.texts[-1][1])
 
     stub_synthesis(plugin, wav_bytes(2.0))
     plugin.ctx.chat.groups["123456"] = "g1"

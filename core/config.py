@@ -32,7 +32,7 @@ class PluginSectionConfig(PluginConfigBase):
     __ui_label__ = "基础设置"
 
     enabled: bool = Field(default=True, description="是否启用语音回复")
-    config_version: str = Field(default="0.5.5", description="配置文件版本号（内部使用，无需修改）")
+    config_version: str = Field(default="0.5.6", description="配置文件版本号（内部使用，无需修改）")
 
 
 class GeneralConfig(PluginConfigBase):
@@ -136,6 +136,54 @@ class TriggerConfig(PluginConfigBase):
     )
 
 
+class TriggerWordRule(PluginConfigBase):
+    """一条触发词规则：词 + 出现位置。"""
+
+    word: str = Field(
+        default="",
+        description="触发词（不写正则，按字面匹配）",
+        json_schema_extra={"label": "触发词", "placeholder": "例如: 用语音"},
+    )
+    mode: Literal["任意", "头", "尾"] = Field(
+        default="任意",
+        description="在文本里的位置：任意=出现在任何地方；头=开头；尾=结尾",
+        json_schema_extra={"label": "位置"},
+    )
+
+    @field_validator("word", mode="before")
+    @classmethod
+    def _strip_word(cls, value: object) -> str:
+        return str(value or "").strip()
+
+    @field_validator("mode", mode="before")
+    @classmethod
+    def _normalize_mode(cls, value: object) -> str:
+        # 兼容 any / head / tail 与「头部 / 尾部」这些写法，最终收敛到下拉框的三个值
+        from . import triggers as _triggers
+
+        mode = _triggers.normalize_mode(value)
+        if mode is None:
+            raise ValueError(f"未知的位置 {value!r}，只能是「任意」「头」「尾」")
+        return _triggers.MODE_LABELS[mode]
+
+
+class TriggerWordsConfig(PluginConfigBase):
+    """触发词引擎（0.5.6）：群里 @ 或点名后，文本里出现触发词就强制这一次回复用语音。"""
+
+    __ui_label__ = "触发词"
+
+    enabled: bool = Field(
+        default=True,
+        description="是否启用触发词：命中后只让这一次回复用语音，不改消息、不剥词；"
+        "私聊直接生效，群聊需要 @ 或点名",
+    )
+    rules: List[TriggerWordRule] = Field(
+        default_factory=list,
+        description="群聊里 @ 机器人（或被点名）后，文本命中任意一条就让这次的回复变成语音",
+        json_schema_extra={"label": "触发词列表", "min_items": 0, "max_items": 50},
+    )
+
+
 class FilterConfig(PluginConfigBase):
     """群聊 / 私聊放行规则"""
 
@@ -181,11 +229,6 @@ class CommandsConfig(PluginConfigBase):
         ge=1,
         le=1000,
         description="test / say 一次最多朗读多少字；超过直接拒绝，不会静默截断",
-    )
-    say_targets: List[str] = Field(
-        default_factory=list,
-        description="say 允许发送的目标白名单（群号或 QQ 号，也可写 g群号 / uQQ号）；留空表示任意目标",
-        json_schema_extra={"placeholder": "例如: 123456789"},
     )
 
 
@@ -365,6 +408,7 @@ class MiMoVoiceConfig(PluginConfigBase):
     mimo: MiMoConfig = Field(default_factory=MiMoConfig)
     delivery: DeliveryConfig = Field(default_factory=DeliveryConfig)
     commands: CommandsConfig = Field(default_factory=CommandsConfig)
+    triggers: TriggerWordsConfig = Field(default_factory=TriggerWordsConfig)
 
 
 # `from __future__ import annotations` 让 pydantic 收到字符串注解：统一在这里重建一次，
@@ -373,6 +417,8 @@ for _config_model in (
     PluginSectionConfig,
     GeneralConfig,
     TriggerConfig,
+    TriggerWordRule,
+    TriggerWordsConfig,
     FilterConfig,
     VoiceConfig,
     MiMoConfig,

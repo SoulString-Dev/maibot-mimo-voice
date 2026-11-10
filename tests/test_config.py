@@ -43,7 +43,8 @@ defaults = {
     "commands_enabled": config.commands.enabled,
     "commands_admins": config.commands.admins,
     "commands_test_max_chars": config.commands.test_max_chars,
-    "commands_say_targets": config.commands.say_targets,
+    "triggers_enabled": config.triggers.enabled,
+    "triggers_rules": config.triggers.rules,
 }
 expected = {
     "mode": "random_llm",
@@ -69,7 +70,8 @@ expected = {
     "commands_enabled": True,
     "commands_admins": [],
     "commands_test_max_chars": 200,
-    "commands_say_targets": [],
+    "triggers_enabled": True,
+    "triggers_rules": [],
 }
 for key, want in expected.items():
     checker.equal(f"默认 {key}", defaults[key], want)
@@ -145,7 +147,7 @@ checker.equal("manifest 版本", manifest["version"], config.plugin.config_versi
 checker.equal("模板 config_version", template["plugin"]["config_version"], config.plugin.config_version)
 checker.equal("sdk 上限不含 99 后缀", manifest["sdk"]["max_version"], "2.12.99")
 checker.check("模板键集合包含模型全部字段", set(template.keys()) == {
-    "plugin", "general", "trigger", "filters", "voice", "mimo", "delivery", "commands"
+    "plugin", "general", "trigger", "filters", "voice", "mimo", "delivery", "commands", "triggers"
 }, f"{sorted(template.keys())}")
 
 sys.exit(checker.report())
