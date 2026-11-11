@@ -11,6 +11,9 @@
 - 群聊 / 私聊各自独立的 `all / whitelist / blacklist` 放行策略。
 - 管理员可私聊发 `/voice`（或 `/vc`）手动试听、查看状态、往指定群/QQ 发语音。
 - 触发词：群里 @ 机器人（或私聊）说「用语音」这类词，这条回复就改用语音，不改消息内容。
+- 可选「语音 + 文字并存」：同一条回复先发文字、再发语音（默认关，只发语音）。
+- 内建定时语音：到点主动往指定群 / QQ 发一条语音（默认关）。
+- 对外 API `voice_say`：其他插件或脚本可以直接要一段语音，也可指定会话发送。
 - 合成前清洗文本（表情、引号、波浪号、省略号、重复标点），并用风格指令压住音色漂移；英文默认只删 `ww` / `emmm` 这类复读口癖，`LLM`、`token`、`cos` 等真词原样朗读。
 
 | 与上游的差异 | 原因 |
@@ -173,6 +176,54 @@ mode = "任意"   # 任意 / 头 / 尾
 - 同一条消息里命中多条规则时取第一条；命令消息（以 `/` 开头）不参与匹配。
 - 触发词优先于短句上限与「随机需纯中文」，但仍受放行规则与 `/voice off` 约束。
 
+## 语音 + 文字并存（0.6.0）
+
+默认只发语音（文字被替换）。想让同一条回复既保留文字又带语音：
+
+```toml
+[delivery]
+keep_text = true
+text_first = true   # true = 先文字后语音；false = 先语音后文字
+```
+
+文字是模型原始回复（未清洗），语音是清洗后的朗读版本，两者内容不完全相同。文字会等语音合成完再一起发，所以最坏情况下文字也要等 25 秒；合成失败时按 `fallback_to_text` 处理（默认只发文字，不额外说明）。
+
+## 定时语音（0.6.0）
+
+内建定时表，到点主动往指定会话发一条语音。默认关闭：
+
+```toml
+[scheduled]
+enabled = true
+
+[[scheduled.entries]]
+time = "08:30"
+days = "每天"            # 每天 / 工作日 / 周末 / mon-fri / 1-5 / 1,3,5（1=周一，7=周日）
+target = "g123456789"    # g 群号 / u QQ号；不带前缀先当群、再当私聊
+text = "早上好，今天也要加油呀"
+```
+
+- `time` 为 24 小时制 `HH:MM`；`days` 支持中文别名、英文缩写与数字。
+- 每条每天最多触发一次；重启后同一分钟内可能补跑一次。
+- 目标会话用 `/voice off` 关掉语音、或正在合成上一条时，这条会跳过并记日志。
+- `content` 目前只支持 `text`；留给未来「让模型现写一句」，填别的值会被跳过并告警。
+- 最多 20 条；时间或星期写错的条目启动时告警并跳过，不影响其他条目。
+
+## 对外 API（0.6.0）
+
+其他插件可以调用 `voice_say` 要一段语音：
+
+| 参数 | 说明 |
+|---|---|
+| `text` | 要朗读的文本（必填，受 `general.max_text_length` 限制） |
+| `stream_id` | 给了就发送到该会话；不给只返回音频 |
+| `return_audio` | 指定 `stream_id` 时，是否同时在结果里返回 base64 音频 |
+| `token` | 配了 `api.token` 时必须原样传入 |
+
+返回 `{"success": true, "seconds": 3.2, "audio_base64": "..."}`（发送成功且未要音频时不含 `audio_base64`）；失败返回 `{"success": false, "error": "..."}`。
+
+宿主调用 API 时**不会带上调用方身份**，所以这里用 `api.token` 做可选的共享口令，而不是按插件 id 白名单。默认 `api.enabled = true`、`token` 为空（本机内网使用；要防误调就设一个随机串）。全局限流 `api.rate_limit_seconds` 默认 5 秒。
+
 ## 群聊 / 私聊过滤
 
 两者互不影响，例如"群聊只放行一个群、私聊全放行"：
@@ -186,7 +237,7 @@ private_mode = "all"
 
 `group_mode` 与 `private_mode` 都不是 `all` 时，插件会记录入站消息的群号 / 对方 QQ 号（`chat.receive.before_process`），出站时按名单判断；两者都是 `all` 时不记录，零额外开销。拿不到对方身份时（映射过期等）一律保持文字，不误放行。
 
-## 配置说明（共 48 项，日常只需动前 12 项）
+## 配置说明（共 55 项，日常只需动前 12 项）
 
 ### 基础
 
@@ -204,6 +255,7 @@ private_mode = "all"
 | `voice.style_instruction` | 见模板 | 随请求发送的朗读风格指令，留空则不发 |
 | `delivery.fallback_to_text` | `true` | 合成失败 / 超时时发文字还是拦截 |
 | `delivery.skip_when_busy` | `true` | 并发路数占满时直接发文字，不排队 |
+| `delivery.keep_text` | `false` | 语音之外同时保留文字（0.6.0，见「语音 + 文字并存」） |
 | `delivery.timbre_match` | `true` | 音色对齐：按参考音频的频谱补偿每条输出（需要 WAV 参考，默认开） |
 | `delivery.timbre_match_strength` | `1.0` | 音色对齐强度 0–1，补偿量限制在 ±6 dB；与参考差距 >8 dB 时按比例减弱 |
 
@@ -211,7 +263,7 @@ private_mode = "all"
 
 | 配置 | 默认 | 说明 |
 |---|---|---|
-| `plugin.config_version` | `0.5.6` | 配置版本号（内部使用，无需修改） |
+| `plugin.config_version` | `0.6.0` | 配置版本号（内部使用，无需修改） |
 | `mimo.api_base_url` | `https://api.xiaomimimo.com/v1` | 必须是 https 公网地址；写成内网/本机地址会回退官方地址并告警 |
 | `mimo.model` | `mimo-v2.5-tts-voiceclone` | 也可用 `mimo-v2.5-tts`（预置音色） |
 | `mimo.audio_format` | `mp3` | `mp3` / `wav`；开了任一音频后处理时自动改用 `wav`，此项实际被忽略 |
@@ -240,6 +292,12 @@ private_mode = "all"
 | `commands.test_max_chars` | `200` | `test` / `say` 单次最多朗读多少字，超过直接拒绝 |
 | `triggers.enabled` | `true` | 是否启用触发词（私聊直接生效，群聊需 @ 或点名） |
 | `triggers.rules` | 一条：`用语音` / `任意` | 触发词规则：`word` + `mode`（任意 / 头 / 尾） |
+| `delivery.text_first` | `true` | 并存时文字先发还是语音先发 |
+| `api.enabled` | `true` | 是否开放 `voice_say` 给其他插件 |
+| `api.token` | 空 | 调用方需原样传入的共享口令；留空不校验 |
+| `api.rate_limit_seconds` | `5.0` | 全局调用间隔（秒），0 = 不限 |
+| `scheduled.enabled` | `false` | 是否启用内建定时语音 |
+| `scheduled.entries` | `[]` | 定时条目（time / days / target / text / content，最多 20 条） |
 | `filters.group_mode` | `all` | 群聊放行：`all` / `whitelist` / `blacklist` |
 | `filters.private_mode` | `all` | 私聊放行：`all` / `whitelist` / `blacklist` |
 | `filters.group_ids` | `[]` | 群号列表 |
@@ -268,11 +326,13 @@ private_mode = "all"
 │   ├── audio.py                 # WAV 读写 / 频谱曲线 / 音色对齐 / 参考瘦身
 │   ├── trigger.py               # 点名窗口 / 情绪加分
 │   ├── timeout.py               # 失败归类
+│   ├── schedule.py              # 定时表的时间 / 星期解析
 │   └── commands.py              # /voice 解析与回执文案
-├── tests/                       # 281 条断言，不依赖 pytest
+├── tests/                       # 359 条断言，不依赖 pytest
 ├── config.example.toml
 ├── _manifest.json
 ├── assets/icon.svg              # 商店图标
+├── .github/workflows/ci.yml     # 每次 push 跑 ruff / mypy / 单测
 ├── presets/                     # 四套内置参考（随插件发布）
 │   ├── reference-bingtang.wav
 │   ├── reference-jasmine.wav
@@ -330,6 +390,13 @@ private_mode = "all"
 
 ## 更新日志
 
+### 0.6.0
+
+- **语音 + 文字并存**（`delivery.keep_text`，默认关）：打开后同一条回复先发文字再发语音（`text_first = false` 可反序）；文字等语音就绪才发，合成失败只发文字。
+- **内建定时语音**（`[scheduled]`，默认关）：到点主动往指定群 / QQ 发一条固定文本语音；`content` 预留了「模型现写」的位置。
+- **对外 API `voice_say`**：给 `stream_id` 就发送、不给只返回 base64；`api.token` 是可选共享口令（宿主不传调用方身份），并加全局调用间隔与长度上限。
+- 单测接入 CI：`.github/workflows/ci.yml` 在每次 push / PR 上跑 ruff、mypy 与 359 条断言。
+
 ### 0.5.6
 
 - **触发词**：群里 @ 机器人（或私聊）后，文本里出现触发词就让这条回复改用语音。规则只填「词 + 位置（任意 / 头 / 尾）」，按字面匹配、不写正则；不剥词、不改消息，失败照常回退文字。
@@ -365,7 +432,7 @@ python -c "import tomllib; tomllib.load(open('config.example.toml','rb'))"
 pip install -r requirements-dev.txt
 ruff check .
 mypy plugin.py core   # 需先装 maibot-plugin-sdk，否则基类被当作 Any，会漏掉 self.config 的类型问题
-python tests/run_all.py     # 文本/音频/配置/超时/触发/命令/触发词七组共 281 条断言
+python tests/run_all.py     # 十一组共 359 条断言（文本/音频/配置/超时/触发/命令/触发词/定时/并存/API）
 ```
 
 Windows 上等价的一条命令：`pwsh -File tools/run_checks.ps1`（已处理控制台编码与临时目录的差异）。
