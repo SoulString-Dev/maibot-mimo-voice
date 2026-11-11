@@ -1450,14 +1450,7 @@ class MiMoVoicePlugin(MaiBotPlugin):
         except Exception as exc:  # pragma: no cover - 兜底，正常不该触发
             self._warn_once("post:failed", "语音后处理失败（%s），本条按原样发出", exc)
 
-        outbound["raw_message"] = [
-            {
-                "type": VOICE_SEGMENT_TYPE,
-                "data": "",
-                "hash": hashlib.sha256(audio).hexdigest(),
-                "binary_data_base64": base64.b64encode(audio).decode("ascii"),
-            }
-        ]
+        outbound["raw_message"] = self._outbound_segments(text, audio)
         outbound["processed_plain_text"] = prepared
         had_reply = bool(kwargs.get("set_reply")) or bool(outbound.get("reply_to"))
         outbound["reply_to"] = None
@@ -1474,13 +1467,32 @@ class MiMoVoicePlugin(MaiBotPlugin):
         if had_reply:
             self.ctx.logger.info("QQ 语音不支持引用组合，已移除会话 %s 的引用段", stream_id)
         self.ctx.logger.info(
-            "已将会话 %s 的纯文本回复替换为语音（%d 字，来源=%s，概率=%.2f）",
+            "已将会话 %s 的纯文本回复替换为语音（%d 字，来源=%s，概率=%.2f，并存=%s）",
             stream_id,
             len(prepared),
             reason,
             probability,
+            self._keep_text_label(),
         )
         return {"action": "continue", "modified_kwargs": kwargs}
+
+    def _outbound_segments(self, text: str, audio: bytes) -> List[Dict[str, Any]]:
+        """拼出站 ``raw_message``：只发语音，或按 ``delivery.keep_text`` 带上原文。"""
+        voice = {
+            "type": VOICE_SEGMENT_TYPE,
+            "data": "",
+            "hash": hashlib.sha256(audio).hexdigest(),
+            "binary_data_base64": base64.b64encode(audio).decode("ascii"),
+        }
+        if not self.config.delivery.keep_text:
+            return [voice]
+        plain = {"type": "text", "data": text}
+        return [plain, voice] if self.config.delivery.text_first else [voice, plain]
+
+    def _keep_text_label(self) -> str:
+        if not self.config.delivery.keep_text:
+            return "关"
+        return "开(文字先)" if self.config.delivery.text_first else "开(语音先)"
 
     # ------------------------------------------------------------ 规划器工具
 
