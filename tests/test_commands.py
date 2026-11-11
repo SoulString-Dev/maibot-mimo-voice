@@ -127,7 +127,7 @@ def test_handler(module) -> int:
     # status
     call(plugin, "/voice status")
     status_text = plugin.ctx.send.texts[-1][1]
-    check.check("status 带版本", "v0.5.6" in status_text)
+    check.check("status 带版本", "v0.6.0" in status_text)
     check.check("status 带超时", "超时 25s" in status_text)
     check.check("status 带会话标签", "QQ 10000002" in status_text)
 

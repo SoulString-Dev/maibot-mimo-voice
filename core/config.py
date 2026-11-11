@@ -9,6 +9,7 @@ from urllib.parse import urlsplit
 from maibot_sdk import Field, PluginConfigBase
 from pydantic import field_validator, model_validator
 
+from . import schedule as _schedule
 from .constants import _DEFAULT_API_BASE, DEFAULT_STYLE_INSTRUCTION, PRESET_ALIASES
 
 _CONFIG_WARNINGS: List[str] = []
@@ -32,7 +33,7 @@ class PluginSectionConfig(PluginConfigBase):
     __ui_label__ = "基础设置"
 
     enabled: bool = Field(default=True, description="是否启用语音回复")
-    config_version: str = Field(default="0.5.6", description="配置文件版本号（内部使用，无需修改）")
+    config_version: str = Field(default="0.6.0", description="配置文件版本号（内部使用，无需修改）")
 
 
 class GeneralConfig(PluginConfigBase):
@@ -232,6 +233,85 @@ class CommandsConfig(PluginConfigBase):
     )
 
 
+class ApiConfig(PluginConfigBase):
+    """对外 API（0.6.0 起）"""
+
+    __ui_label__ = "对外 API"
+
+    enabled: bool = Field(default=True, description="是否允许其他插件调用 voice_say")
+    token: str = Field(
+        default="",
+        description="访问口令；留空=不校验。填写后调用方必须在参数里带同样的 token。"
+        "宿主调用 API 时不传调用方身份，所以无法按插件做白名单，口令是唯一可用的门槛",
+    )
+    rate_limit_seconds: float = Field(
+        default=5.0,
+        ge=0.0,
+        le=60.0,
+        description="两次调用的最小间隔（秒），0=不限；拿不到调用方身份，因此是全局限制",
+    )
+
+
+class ScheduleEntry(PluginConfigBase):
+    """一条定时语音"""
+
+    enabled: bool = Field(default=True, description="是否启用这一条")
+    time: str = Field(default="08:30", description="发送时间，HH:MM（24 小时制）")
+    days: str = Field(
+        default="daily",
+        description="发送日：daily / 工作日 / mon-fri / mon,wed,fri / 1-5（1=周一）",
+    )
+    target: str = Field(
+        default="",
+        description="群号或 QQ 号，可带 g/u 前缀；不带前缀时先找活跃群、再找私聊",
+    )
+    text: str = Field(default="", description="要朗读的固定文本")
+    content: str = Field(
+        default="text",
+        description="目前只支持 text；llm 预留给后续版本，填其他值会在启动时告警并跳过",
+    )
+
+
+class ScheduledConfig(PluginConfigBase):
+    """内建定时语音（0.6.0 起）"""
+
+    __ui_label__ = "定时语音"
+
+    enabled: bool = Field(default=False, description="按下面的表主动发语音（默认关闭）")
+    entries: List[ScheduleEntry] = Field(
+        default_factory=list,
+        description="最多 20 条；时间/星期/目标/文本非法的条目会在启动时告警并跳过",
+        json_schema_extra={"min_items": 0, "max_items": 20},
+    )
+
+    @model_validator(mode="after")
+    def _check_entries(self) -> "ScheduledConfig":
+        kept: List[ScheduleEntry] = []
+        for index, entry in enumerate(self.entries, start=1):
+            problem = _schedule_entry_problem(entry)
+            if problem:
+                add_config_warning(f"scheduled.entries 第 {index} 条不可用（{problem}），已跳过")
+                continue
+            kept.append(entry)
+        object.__setattr__(self, "entries", kept)
+        return self
+
+
+def _schedule_entry_problem(entry: ScheduleEntry) -> str:
+    """返回该条目的问题描述；空串表示可用。"""
+    if _schedule.parse_time(entry.time) is None:
+        return "time 应为 HH:MM"
+    if _schedule.parse_days(entry.days) is None:
+        return "days 写法无法识别"
+    if not (entry.target or "").strip():
+        return "target 不能为空"
+    if not (entry.text or "").strip():
+        return "text 不能为空"
+    if entry.content != "text":
+        return "content 目前只支持 text"
+    return ""
+
+
 class VoiceConfig(PluginConfigBase):
     """参考音频与音色"""
 
@@ -324,6 +404,14 @@ class DeliveryConfig(PluginConfigBase):
     __ui_label__ = "发送"
 
     fallback_to_text: bool = Field(default=True, description="合成失败/超时时是否回退发送文字")
+    keep_text: bool = Field(
+        default=False,
+        description="语音之外再发一条文字（0.6.0 起）；开启后文字要等语音合成完成才发，最坏等一个合成超时",
+    )
+    text_first: bool = Field(
+        default=True,
+        description="并存时的顺序：True=文字先、语音后；False=语音先、文字后",
+    )
     skip_when_busy: bool = Field(
         default=True,
         description="并发已满时直接发文字（True），或排队等待（False，可能把整条回复拖到超时）",
@@ -409,6 +497,8 @@ class MiMoVoiceConfig(PluginConfigBase):
     delivery: DeliveryConfig = Field(default_factory=DeliveryConfig)
     commands: CommandsConfig = Field(default_factory=CommandsConfig)
     triggers: TriggerWordsConfig = Field(default_factory=TriggerWordsConfig)
+    api: ApiConfig = Field(default_factory=ApiConfig)
+    scheduled: ScheduledConfig = Field(default_factory=ScheduledConfig)
 
 
 # `from __future__ import annotations` 让 pydantic 收到字符串注解：统一在这里重建一次，
@@ -423,6 +513,9 @@ for _config_model in (
     VoiceConfig,
     MiMoConfig,
     DeliveryConfig,
+    ApiConfig,
+    ScheduleEntry,
+    ScheduledConfig,
     MiMoVoiceConfig,
 ):
     _config_model.model_rebuild(_types_namespace=globals())

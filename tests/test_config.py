@@ -45,6 +45,13 @@ defaults = {
     "commands_test_max_chars": config.commands.test_max_chars,
     "triggers_enabled": config.triggers.enabled,
     "triggers_rules": [(r.word, r.mode) for r in config.triggers.rules],
+    "delivery_keep_text": config.delivery.keep_text,
+    "delivery_text_first": config.delivery.text_first,
+    "api_enabled": config.api.enabled,
+    "api_token": config.api.token,
+    "api_rate_limit_seconds": config.api.rate_limit_seconds,
+    "scheduled_enabled": config.scheduled.enabled,
+    "scheduled_entries": [(e.time, e.days, e.target, e.text) for e in config.scheduled.entries],
 }
 expected = {
     "mode": "random_llm",
@@ -72,9 +79,30 @@ expected = {
     "commands_test_max_chars": 200,
     "triggers_enabled": True,
     "triggers_rules": [("用语音", "任意")],
+    "delivery_keep_text": False,
+    "delivery_text_first": True,
+    "api_enabled": True,
+    "api_token": "",
+    "api_rate_limit_seconds": 5.0,
+    "scheduled_enabled": False,
+    "scheduled_entries": [],
 }
 for key, want in expected.items():
     checker.equal(f"默认 {key}", defaults[key], want)
+
+# ---------------------------------------------------------------- 定时条目校验
+cfg.drain_config_warnings()
+scheduled = cfg.MiMoVoiceConfig(scheduled={"entries": [
+    {"time": "08:30", "days": "daily", "target": "g123", "text": "早安"},
+    {"time": "25:00", "days": "daily", "target": "g123", "text": "时间错"},
+    {"time": "09:00", "days": "周末", "target": "g123", "text": "周末"},
+    {"time": "10:00", "days": "daily", "target": "", "text": "没目标"},
+    {"time": "11:00", "days": "daily", "target": "g123", "text": "内容错", "content": "llm"},
+]})
+warnings = cfg.drain_config_warnings()
+checker.equal("合法条目保留", [(e.time, e.days) for e in scheduled.scheduled.entries],
+              [("08:30", "daily"), ("09:00", "周末")])
+checker.equal("非法条目各告警一次", len(warnings), 3)
 
 # ---------------------------------------------------------------- 音色别名
 checker.equal("默认音色是理塘王", cfg.MiMoVoiceConfig().voice.preset, "理塘王")
@@ -147,7 +175,8 @@ checker.equal("manifest 版本", manifest["version"], config.plugin.config_versi
 checker.equal("模板 config_version", template["plugin"]["config_version"], config.plugin.config_version)
 checker.equal("sdk 上限不含 99 后缀", manifest["sdk"]["max_version"], "2.12.99")
 checker.check("模板键集合包含模型全部字段", set(template.keys()) == {
-    "plugin", "general", "trigger", "filters", "voice", "mimo", "delivery", "commands", "triggers"
+    "plugin", "general", "trigger", "filters", "voice", "mimo", "delivery", "commands", "triggers",
+    "api", "scheduled"
 }, f"{sorted(template.keys())}")
 
 sys.exit(checker.report())

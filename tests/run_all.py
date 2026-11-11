@@ -10,7 +10,7 @@ import sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-SUITES = ["test_text.py", "test_audio.py", "test_config.py", "test_timeout.py", "test_trigger.py", "test_commands.py", "test_triggers.py"]
+SUITES = ["test_text.py", "test_audio.py", "test_config.py", "test_timeout.py", "test_trigger.py", "test_commands.py", "test_triggers.py", "test_schedule.py"]
 
 
 def main() -> int:
@@ -18,7 +18,13 @@ def main() -> int:
     for name in SUITES:
         path = HERE / name
         print(f"\n=== {name} ===")
-        result = subprocess.run([sys.executable, str(path)], capture_output=True, text=True)
+        result = subprocess.run(
+            [sys.executable, str(path)],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
         output = (result.stdout or "") + (result.stderr or "")
         print(output.rstrip())
         if result.returncode != 0:
