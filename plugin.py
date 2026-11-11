@@ -31,7 +31,7 @@ from typing import Any, Dict, List, Optional, Tuple, cast
 from urllib.parse import urlsplit
 
 import aiohttp
-from maibot_sdk import CONFIG_RELOAD_SCOPE_SELF, Command, HookHandler, MaiBotPlugin, Tool
+from maibot_sdk import API, CONFIG_RELOAD_SCOPE_SELF, Command, HookHandler, MaiBotPlugin, Tool
 from maibot_sdk.types import ErrorPolicy, HookMode, HookOrder
 
 from .core import commands as _commands
@@ -156,6 +156,8 @@ class MiMoVoicePlugin(MaiBotPlugin):
         self._synthesis_slots = asyncio.Semaphore(1)
         # 被 @ / 点名后的一次性优先窗口（只在 trigger.mention_priority 打开时记录）
         self._mention_priority = _trigger.MentionPriority()
+        # 对外 API 的上次调用时间（全局限流用；宿主不传调用方身份）
+        self._api_last_call: float = 0.0
         # 命令层（0.5.5）：会话级开关（进程内，重启复位）与近期合成样本
         self._session_switch: Dict[str, bool] = {}
         self._recent_durations: List[float] = []
@@ -1802,6 +1804,68 @@ class MiMoVoicePlugin(MaiBotPlugin):
             self.ctx.logger.warning("命令语音发送失败（%s）", exc)
             return False
         return True
+
+    # ------------------------------------------------------------ 对外 API
+
+    @API(
+        "voice_say",
+        description="合成语音：给 stream_id 就发送到该会话，不给只返回音频",
+        version="1",
+        public=True,
+    )
+    async def handle_voice_say(
+        self,
+        text: str = "",
+        stream_id: str = "",
+        return_audio: bool = False,
+        token: str = "",
+    ) -> Dict[str, Any]:
+        """0.6.0 对外 API：其他插件或脚本可以直接要一段语音。
+
+        宿主不会把调用方身份传给 handler（``_cap_api_call`` 只透传 ``args``），
+        所以这里用 ``api.token`` 做可选的共享口令，而不是按插件 id 白名单。
+        不给 ``stream_id`` 时只合成并返回 base64；给了就发送到该会话。
+        """
+        api = self.config.api
+        if not api.enabled:
+            return {"success": False, "error": "语音 API 已关闭"}
+        expected = (api.token or "").strip()
+        if expected and str(token or "") != expected:
+            return {"success": False, "error": "token 不正确"}
+        raw = str(text or "").strip()
+        if not raw:
+            return {"success": False, "error": "text 不能为空"}
+        limit = int(self.config.general.max_text_length)
+        if len(raw) > limit:
+            return {"success": False, "error": f"text 太长（{len(raw)} 字，上限 {limit} 字）"}
+        interval = float(api.rate_limit_seconds)
+        now = time.monotonic()
+        if interval > 0 and now - self._api_last_call < interval:
+            return {"success": False, "error": f"调用太频繁，请 {interval:g} 秒后再试"}
+        self._api_last_call = now
+        prepared = self._prepare_text(raw)
+        if prepared is None:
+            return {"success": False, "error": "没有可朗读的内容"}
+        try:
+            audio = await self._synthesize_guarded(prepared)
+        except _SynthesisBusy:
+            return {"success": False, "error": "正在合成上一条语音，请稍后再试"}
+        except Exception as exc:
+            return {"success": False, "error": str(exc)}
+        try:
+            audio = await asyncio.to_thread(self._postprocess, audio)
+        except Exception as exc:
+            self._warn_once("api:post", "语音后处理失败（%s），本条按原样返回", exc)
+        result: Dict[str, Any] = {"success": True, "seconds": _payload_seconds(audio) or 0.0}
+        target = str(stream_id or "").strip()
+        if target:
+            if not await self._send_voice(target, audio):
+                return {"success": False, "error": "语音发送失败"}
+            if return_audio:
+                result["audio_base64"] = base64.b64encode(audio).decode("ascii")
+            return result
+        result["audio_base64"] = base64.b64encode(audio).decode("ascii")
+        return result
 
     def _check_admin_entries(self) -> None:
         """启动时提醒 ``commands.admins`` 里写错、永远匹配不到的条目。"""
