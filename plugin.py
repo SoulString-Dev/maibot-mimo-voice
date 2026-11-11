@@ -26,6 +26,7 @@ import shutil
 import subprocess
 import time
 import wave
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, cast
 from urllib.parse import urlsplit
@@ -36,6 +37,7 @@ from maibot_sdk.types import ErrorPolicy, HookMode, HookOrder
 
 from .core import commands as _commands
 from .core import config as _config
+from .core import schedule as _schedule
 from .core import text as _text
 from .core import timeout as _timeout
 from .core import trigger as _trigger
@@ -158,6 +160,10 @@ class MiMoVoicePlugin(MaiBotPlugin):
         self._mention_priority = _trigger.MentionPriority()
         # 对外 API 的上次调用时间（全局限流用；宿主不传调用方身份）
         self._api_last_call: float = 0.0
+        # 内建定时语音（0.6.0）：后台循环 + 当天已跑过的条目
+        self._schedule_task: Optional[asyncio.Task] = None
+        self._schedule_done: Dict[Tuple[str, int, int], float] = {}
+        self._schedule_runs: set[asyncio.Task] = set()
         # 命令层（0.5.5）：会话级开关（进程内，重启复位）与近期合成样本
         self._session_switch: Dict[str, bool] = {}
         self._recent_durations: List[float] = []
@@ -188,7 +194,7 @@ class MiMoVoicePlugin(MaiBotPlugin):
             "MiMo 语音插件已加载：音色=%s, mode=%s, probability=%.2f, 短句上限=%d字, 合成=%s, "
             "风格指令=%s, 参考策略=%s, 英文=%s, 随机需纯中文=%s, 超时=%.0fs, "
             "音色对齐=%s, 尾部裁剪=%dms, 尾部补静音=%dms, 峰值归一=%s, 群聊放行=%s, 私聊放行=%s, "
-            "点名优先=%s(%.2f), 情绪加权=%s(+%.2f/上限%.2f), 触发词=%s",
+            "点名优先=%s(%.2f), 情绪加权=%s(+%.2f/上限%.2f), 触发词=%s, 定时=%s",
             PRESET_DISPLAY_NAMES.get(self.config.voice.preset, self.config.voice.preset),
             self.config.trigger.mode,
             self.config.trigger.probability,
@@ -215,6 +221,11 @@ class MiMoVoicePlugin(MaiBotPlugin):
                 if self.config.triggers.enabled and self.config.triggers.rules
                 else "关"
             ),
+            (
+                f"开({len(self._scheduled_entries())} 条)"
+                if self.config.scheduled.enabled and self._scheduled_entries()
+                else "关"
+            ),
         )
         if data_dir is not None:
             self.ctx.logger.info("参考音频目录：%s（自定义音色把文件放这里）", data_dir / "references")
@@ -231,6 +242,7 @@ class MiMoVoicePlugin(MaiBotPlugin):
                 "若只是误填，把 mimo.api_base_url 改回 https://api.xiaomimimo.com/v1",
                 base_host,
             )
+        self._start_scheduler()
 
     def _flush_config_warnings(self) -> None:
         """把本轮配置校验攒下的告警按类别去重后打一次就清空。
@@ -254,11 +266,14 @@ class MiMoVoicePlugin(MaiBotPlugin):
             self.ctx.logger.warning("另有 %d 类配置告警未展开，详见 config.toml 与插件文档", hidden)
 
     async def on_unload(self) -> None:
+        await self._stop_scheduler()
         await self._close_session()
 
     async def on_config_update(self, scope: str, config_data: Dict[str, Any], version: str) -> None:
         if scope != CONFIG_RELOAD_SCOPE_SELF:
             return
+        await self._stop_scheduler()
+        self._schedule_done.clear()
         await self._close_session()
         self._random_decisions.clear()
         self._text_override_sessions.clear()
@@ -274,6 +289,7 @@ class MiMoVoicePlugin(MaiBotPlugin):
         self._synthesis_slots = asyncio.Semaphore(max(1, int(self.config.mimo.max_concurrent)))
         self.ctx.logger.info("MiMo 语音插件配置已热更新")
         self._flush_config_warnings()
+        self._start_scheduler()
 
     async def _close_session(self) -> None:
         if self._session is not None and not self._session.closed:
@@ -1804,6 +1820,139 @@ class MiMoVoicePlugin(MaiBotPlugin):
             self.ctx.logger.warning("命令语音发送失败（%s）", exc)
             return False
         return True
+
+    # ------------------------------------------------------------ 定时语音
+
+    def _scheduled_entries(self) -> List[Any]:
+        return [entry for entry in self.config.scheduled.entries if entry.enabled]
+
+    def _start_scheduler(self) -> None:
+        if not self.config.scheduled.enabled or not self._scheduled_entries():
+            return
+        if self._schedule_task is not None and not self._schedule_task.done():
+            return
+        self._schedule_task = asyncio.create_task(self._scheduler_loop())
+
+    async def _stop_scheduler(self) -> None:
+        task = self._schedule_task
+        self._schedule_task = None
+        if task is None or task.done():
+            return
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+    async def _scheduler_loop(self) -> None:
+        """每分钟整点检查一次；条目本身可能耗几十秒，交给独立任务跑。"""
+        while True:
+            now = time.time()
+            await asyncio.sleep(max(1.0, 60.0 - now % 60.0))
+            try:
+                await self._scheduler_tick(datetime.now())
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                self.ctx.logger.warning("定时语音检查失败（%s）", exc)
+
+    async def _scheduler_tick(self, moment: datetime) -> None:
+        for index, entry in self._due_entries(moment):
+            task = asyncio.create_task(self._run_scheduled(index, entry))
+            self._schedule_runs.add(task)
+            task.add_done_callback(self._schedule_runs.discard)
+
+    def _due_entries(self, moment: datetime) -> List[Tuple[int, Any]]:
+        """返回这一分钟该跑的条目，并把它们记为「已跑」，避免同一分钟重复触发。"""
+        if not self.config.scheduled.enabled:
+            return []
+        day = moment.strftime("%Y-%m-%d")
+        slot = moment.hour * 60 + moment.minute
+        due: List[Tuple[int, Any]] = []
+        for index, entry in enumerate(self.config.scheduled.entries):
+            if not entry.enabled:
+                continue
+            if not _schedule.entry_due(entry.time, entry.days, moment):
+                continue
+            key = (day, index, slot)
+            if key in self._schedule_done:
+                continue
+            self._schedule_done[key] = time.monotonic()
+            due.append((index, entry))
+        if len(self._schedule_done) > 512:
+            for key in sorted(self._schedule_done)[:-128]:
+                self._schedule_done.pop(key, None)
+        return due
+
+    async def _run_scheduled(self, index: int, entry: Any) -> None:
+        label = f"{entry.time} {entry.days}".strip()
+        content = str(entry.content or "text").strip().lower()
+        if content != "text":
+            self._warn_once(
+                f"scheduled:{index}:content",
+                "定时条目 %s 的 content=%r 暂不支持，已跳过（目前只支持固定文本）",
+                label,
+                entry.content,
+            )
+            return
+        raw = str(entry.text or "").strip()
+        target = str(entry.target or "").strip()
+        if not raw or not target:
+            self._warn_once(
+                f"scheduled:{index}:empty",
+                "定时条目 %s 缺少 text 或 target，已跳过",
+                label,
+            )
+            return
+        stream_id, _kind, error = await self._resolve_stream(target)
+        if error:
+            self._warn_once(f"scheduled:{index}:target", "定时条目 %s %s", label, error)
+            return
+        if self._session_switch.get(stream_id) is False:
+            self.ctx.logger.info("定时语音跳过：会话 %s 已关闭语音", stream_id)
+            return
+        if self._synthesis_slots.locked():
+            self.ctx.logger.info("定时语音跳过：正在合成上一条语音")
+            return
+        prepared = self._prepare_text(raw)
+        if prepared is None:
+            self._warn_once(f"scheduled:{index}:text", "定时条目 %s 没有可朗读的内容，已跳过", label)
+            return
+        started = time.monotonic()
+        try:
+            audio = await self._synthesize_guarded(prepared)
+            audio = await asyncio.to_thread(self._postprocess, audio)
+        except _SynthesisBusy:
+            self.ctx.logger.info("定时语音跳过：正在合成上一条语音")
+            return
+        except Exception as exc:
+            self.ctx.logger.warning("定时语音失败（%s）：%s", label, exc)
+            return
+        if self.config.delivery.keep_text and self.config.delivery.text_first:
+            await self._send_text(stream_id, raw)
+        if not await self._send_voice(stream_id, audio):
+            self.ctx.logger.warning("定时语音发送失败：%s → %s", label, stream_id)
+            return
+        if self.config.delivery.keep_text and not self.config.delivery.text_first:
+            await self._send_text(stream_id, raw)
+        self.ctx.logger.info(
+            "定时语音已发送：%s → %s（%d 字，%.1fs）",
+            label,
+            stream_id,
+            len(raw),
+            time.monotonic() - started,
+        )
+
+    async def _resolve_stream(self, target: str, platform: str = "qq") -> Tuple[str, str, str]:
+        """把 ``g123`` / ``u456`` / ``123`` 解析成 stream_id，供命令与定时共用。"""
+        kind, ident = _commands.parse_target(target)
+        if not ident:
+            return "", "", f"目标 {target!r} 无法解析（可用 g群号 / uQQ号）"
+        return await self._resolve_command_target(kind, ident, platform)
+
+    async def _send_text(self, stream_id: str, text: str) -> None:
+        try:
+            await self.ctx.send.text(text, stream_id=stream_id)
+        except Exception as exc:
+            self.ctx.logger.warning("定时语音的文字段发送失败（%s）", exc)
 
     # ------------------------------------------------------------ 对外 API
 
