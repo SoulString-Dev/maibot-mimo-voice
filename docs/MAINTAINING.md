@@ -4,7 +4,7 @@
 >
 > 已确认的上游限制：MiMo 每个账号的 TTS 并发名额只有 1，客户端超时后服务端仍在生成（探针最长 72.7 秒），超时后重发必 429（0.3–0.5 秒内被拒）。所以「重发」「自适应等更久」都不再有意义，见 `maibot-voice/docs/analysis-dual-draft.md` 与 README 的「429 与超时」。
 >
-**0.6.0 已在本机实现、未部署未发版**（11-11）：语音 + 文字并存（`delivery.keep_text`，默认关）、内建定时语音（`[scheduled]`，默认关）、对外 API `voice_say`（`api.token` 共享口令 + 全局限流）、单测接入 CI；设计见 `docs/superpowers/specs/2026-11-11-voice-0.6.0-design.md`，计划见 `docs/superpowers/plans/2026-11-11-voice-0.6.0.md`；11 个文件 359 条断言全绿。
+**0.6.0 已铺 NAS 观察（11-11 23:19 部署、未发版）**（11-11）：语音 + 文字并存（`delivery.keep_text`，默认关）、内建定时语音（`[scheduled]`，默认关）、对外 API `voice_say`（`api.token` 共享口令 + 全局限流）、单测接入 CI；设计见 `docs/superpowers/specs/2026-11-11-voice-0.6.0-design.md`，计划见 `docs/superpowers/plans/2026-11-11-voice-0.6.0.md`；11 个文件 359 条断言全绿。
 > 0.5.6（11-11 01:01 发版，tag/Release `accced2`，Release id `440650886`；11-11 07:13 自动收录 #1584，`pass`/`risks=[]`）：触发词引擎 + 点名/情绪加权默认开 + 默认规则「用语音 / 任意」，281 条测试全绿，11-11 00:49 已铺 NAS。
 > 0.5.5（tag/Release `f519fa0`，Release id `439280802`）已实现命令层（`/voice|/vc` 的 `on` / `off` / `test` / `status` / `say` / `help`，**只在私聊、只对 `commands.admins` 生效**，方案与实现见 `maibot-voice/docs/commands-0.5.5.md`）：228 条测试全绿，11-09 22:53 已铺 NAS；商店 11-10 01:33 自动收录（审核单 #1544）。再往后 0.6.x 计划做纯 Python 参考烘焙 + 内置音色扩充（`voice.pitch` 三档在 10-31 实测全部失败，已不做，见 `docs/roadmap.md`）；熔断仍未做，等失败簇数据。
 
