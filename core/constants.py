@@ -105,3 +105,7 @@ _REFERENCE_MAX_BYTES = int(9.5 * 1024 * 1024)
 # 所以在 general.timeout 之上再留 10 秒；过期即作废，不会把十分钟后的无关回复也变成语音。
 _TRIGGER_TTL_MARGIN_SECONDS = 10.0
 _TRIGGER_MIN_INTERVAL_SECONDS = 5.0
+
+# 并存（0.6.0）：文字与语音分两条消息发。一条消息里混 [text, voice] 时，适配器可能只
+# 落地语音段（2026-11-16 线上实测），所以语音先时等这么久再补文字，避免两条抢顺序。
+_KEEP_TEXT_DELAY_SECONDS = 1.5

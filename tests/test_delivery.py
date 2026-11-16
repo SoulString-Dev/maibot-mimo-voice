@@ -1,4 +1,4 @@
-"""并存测试：语音之外再发一条文字时的段顺序与内容。"""
+"""并存测试：语音单独一条，文字另发一条（不混在同一条消息里）。"""
 
 from __future__ import annotations
 
@@ -49,13 +49,24 @@ def message(text: str) -> dict:
 
 
 def convert(plugin, text: str = "你好呀😀"):
-    return asyncio.run(
-        plugin.convert_outbound_text(message=message(text), stream_id="s1", set_reply=False)
-    )
+    """转换并等所有延迟任务跑完（测试里把延迟改成 0）。"""
+
+    async def run():
+        result = await plugin.convert_outbound_text(
+            message=message(text), stream_id="s1", set_reply=False
+        )
+        pending = list(plugin._pending_text_tasks)
+        if pending:
+            await asyncio.gather(*pending)
+        return result
+
+    return asyncio.run(run())
 
 
 def test_delivery(module) -> int:
     check = Checker("并存：语音 + 文字")
+
+    module._KEEP_TEXT_DELAY_SECONDS = 0.0
 
     plugin, _config, _logger = make_ready(module)
     stub_synthesis(plugin, wav_bytes())
@@ -63,24 +74,28 @@ def test_delivery(module) -> int:
     segments = result["modified_kwargs"]["message"]["raw_message"]
     check.equal("默认只有语音一段", len(segments), 1)
     check.equal("默认段类型", segments[0]["type"], "voice")
+    check.equal("默认不额外发文字", plugin.ctx.send.texts, [])
 
     plugin, _config, _logger = make_ready(module, delivery={"keep_text": True})
     stub_synthesis(plugin, wav_bytes())
     result = convert(plugin, "你好呀😀")
     segments = result["modified_kwargs"]["message"]["raw_message"]
-    check.equal("并存两段", len(segments), 2)
-    check.equal("文字先", [segment["type"] for segment in segments], ["text", "voice"])
-    check.equal("文字是原始回复", segments[0]["data"], "你好呀😀")
+    check.equal("文字先：消息里仍只有语音", [segment["type"] for segment in segments], ["voice"])
+    check.equal("文字先：文字单独发一条", plugin.ctx.send.texts, [("s1", "你好呀😀")])
 
-    plugin, _config, _logger = make_ready(module, delivery={"keep_text": True, "text_first": False})
+    plugin, _config, _logger = make_ready(
+        module, delivery={"keep_text": True, "text_first": False}
+    )
     stub_synthesis(plugin, wav_bytes())
     result = convert(plugin, "你好呀😀")
     segments = result["modified_kwargs"]["message"]["raw_message"]
-    check.equal("语音先", [segment["type"] for segment in segments], ["voice", "text"])
+    check.equal("语音先：消息里只有语音", [segment["type"] for segment in segments], ["voice"])
+    check.equal("语音先：文字随后补发", plugin.ctx.send.texts, [("s1", "你好呀😀")])
 
     plugin, _config, _logger = make_ready(module, delivery={"keep_text": True})
     stub_failure(plugin)
     check.equal("失败时保持原文（不额外发文字）", convert(plugin, "你好呀😀"), None)
+    check.equal("失败时不补发文字", plugin.ctx.send.texts, [])
 
     plugin, _config, _logger = make_ready(
         module, delivery={"keep_text": True, "fallback_to_text": False}

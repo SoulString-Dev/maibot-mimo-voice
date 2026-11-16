@@ -7,7 +7,7 @@ README 只保留最新一版的要点。
 
 ### 新增
 
-- **语音 + 文字并存**（`delivery.keep_text`，默认 `false`）：打开后同一条回复发两段——文字（模型原始回复）与语音（清洗后的朗读版本）。`delivery.text_first` 控制顺序（默认文字先）。文字等语音合成完再发，最坏等 `general.timeout`（25 秒）；合成失败只发文字，不额外说明。
+- **语音 + 文字并存**（`delivery.keep_text`，默认 `false`）：打开后回复拆成**两条消息**——文字（模型原始回复）与语音（清洗后的朗读版本）。`delivery.text_first` 控制顺序（默认文字先）。文字等语音合成完再发，最坏等 `general.timeout`（25 秒）；合成失败只发文字，不额外说明。
 - **内建定时语音**（`[scheduled]`，默认 `false`）：`[[scheduled.entries]]` 支持 `time`（`HH:MM`）、`days`（每天 / 工作日 / 周末 / `mon-fri` / `1-5` / `1,3,5`）、`target`（`g群号` / `uQQ号`，无前缀先群后私聊）、`text`、`content`。每条每天最多一次；最多 20 条；时间/星期写错的条目启动时告警并跳过。目标会话被 `/voice off` 关掉或正在合成时跳过并记日志。
 - **对外 API `voice_say`**：`text` 必填；给 `stream_id` 就发送、不给只返回 base64（`return_audio` 可让「发送 + 返回音频」同时成立）；失败一律返回 `{"success": false, "error": ...}`，不抛异常。
 - **CI**：`.github/workflows/ci.yml` 在每次 push / PR 上跑 ruff、mypy 与全部单测（Python 3.13）。
@@ -17,6 +17,7 @@ README 只保留最新一版的要点。
 - `plugin.config_version` 升到 0.6.0；`config.example.toml` 新增 `[delivery]` 两项、`[api]` 与 `[scheduled]` 段。
 - **API 鉴权用 `api.token` 而非插件白名单**：宿主 `_cap_api_call` 只透传 `args["args"]`，不注入调用方身份，按插件 id 限制无法实现。`token` 留空 = 不校验；另加全局 `api.rate_limit_seconds`（默认 5 秒）与 `general.max_text_length` 长度上限。
 - 定时与 API 共用 `_resolve_stream`（`g` / `u` 前缀或自动判断），命令层的 `/voice say` 行为不变。
+- **并存改为两条消息**：一条消息里混 `[文字, 语音]` 时，部分适配器只落地语音段（2026-11-16 线上实测：四条回复的文字都没出现）。现在语音单独一条，文字用 `ctx.send.text` 另发；`text_first = false` 时文字延迟 1.5 秒补发，避免与语音抢顺序。
 
 ## [0.5.6] - 2026-11-11
 

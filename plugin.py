@@ -60,6 +60,7 @@ from .core.constants import (
     _AUDIO_SECONDS_CAP,
     _AUDIO_SECONDS_PER_CHAR,
     _FFMPEG_BIN,
+    _KEEP_TEXT_DELAY_SECONDS,
     _MAX_AUDIO_SECONDS,
     _MIN_AUDIO_BYTES,
     _MIN_AUDIO_SECONDS,
@@ -172,6 +173,8 @@ class MiMoVoicePlugin(MaiBotPlugin):
         # 触发词（0.5.6）：session_id -> (词, 位置, 过期时间)；命中只在出站消费一次
         self._trigger_requests: Dict[str, Tuple[str, str, float]] = {}
         self._trigger_last_hit: Dict[str, float] = {}
+        # 并存（0.6.0）：文字与语音分两条发，语音先时用这个集合挂延迟发文字的任务
+        self._pending_text_tasks: set[asyncio.Task] = set()
 
     # ------------------------------------------------------------------ 生命周期
 
@@ -267,6 +270,9 @@ class MiMoVoicePlugin(MaiBotPlugin):
 
     async def on_unload(self) -> None:
         await self._stop_scheduler()
+        for task in list(self._pending_text_tasks):
+            task.cancel()
+        self._pending_text_tasks.clear()
         await self._close_session()
 
     async def on_config_update(self, scope: str, config_data: Dict[str, Any], version: str) -> None:
@@ -1468,7 +1474,14 @@ class MiMoVoicePlugin(MaiBotPlugin):
         except Exception as exc:  # pragma: no cover - 兜底，正常不该触发
             self._warn_once("post:failed", "语音后处理失败（%s），本条按原样发出", exc)
 
-        outbound["raw_message"] = self._outbound_segments(text, audio)
+        # 语音单独成一条。文字另发：一条消息里混 [text, voice] 时，适配器可能只落地语音段
+        # （2026-11-16 线上实测：同一条混合消息里文字被吞，拆成两条后稳定）。
+        outbound["raw_message"] = [self._voice_segment(audio)]
+        if self.config.delivery.keep_text:
+            if self.config.delivery.text_first:
+                await self._send_text(stream_id, text)
+            else:
+                self._spawn_text(stream_id, text)
         outbound["processed_plain_text"] = prepared
         had_reply = bool(kwargs.get("set_reply")) or bool(outbound.get("reply_to"))
         outbound["reply_to"] = None
@@ -1494,18 +1507,27 @@ class MiMoVoicePlugin(MaiBotPlugin):
         )
         return {"action": "continue", "modified_kwargs": kwargs}
 
-    def _outbound_segments(self, text: str, audio: bytes) -> List[Dict[str, Any]]:
-        """拼出站 ``raw_message``：只发语音，或按 ``delivery.keep_text`` 带上原文。"""
-        voice = {
+    @staticmethod
+    def _voice_segment(audio: bytes) -> Dict[str, Any]:
+        """出站语音段。文字不再塞进同一条消息，见 ``convert_outbound_text``。"""
+
+        return {
             "type": VOICE_SEGMENT_TYPE,
             "data": "",
             "hash": hashlib.sha256(audio).hexdigest(),
             "binary_data_base64": base64.b64encode(audio).decode("ascii"),
         }
-        if not self.config.delivery.keep_text:
-            return [voice]
-        plain = {"type": "text", "data": text}
-        return [plain, voice] if self.config.delivery.text_first else [voice, plain]
+
+    def _spawn_text(self, stream_id: str, text: str) -> None:
+        """语音先时，等语音落地后再补一条文字（不等结果，失败只告警）。"""
+
+        async def delayed() -> None:
+            await asyncio.sleep(_KEEP_TEXT_DELAY_SECONDS)
+            await self._send_text(stream_id, text)
+
+        task = asyncio.create_task(delayed())
+        self._pending_text_tasks.add(task)
+        task.add_done_callback(self._pending_text_tasks.discard)
 
     def _keep_text_label(self) -> str:
         if not self.config.delivery.keep_text:
@@ -1952,7 +1974,7 @@ class MiMoVoicePlugin(MaiBotPlugin):
         try:
             await self.ctx.send.text(text, stream_id=stream_id)
         except Exception as exc:
-            self.ctx.logger.warning("定时语音的文字段发送失败（%s）", exc)
+            self.ctx.logger.warning("文字段发送失败（%s）", exc)
 
     # ------------------------------------------------------------ 对外 API
 

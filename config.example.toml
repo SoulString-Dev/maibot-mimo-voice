@@ -183,6 +183,7 @@ fallback_to_text = true
 # 开启后文字要等语音合成完成才发（最坏等一个合成超时 25 秒），换来"能看也能听"。
 keep_text = false
 # 并存时的顺序：true=文字先、语音后；false=语音先、文字后。
+# 文字与语音分两条消息发送（混在同一条时部分适配器只落地语音）。
 text_first = true
 # 并发已满时直接发文字（建议开；关掉会排队，可能拖到超时）。
 skip_when_busy = true

@@ -11,7 +11,7 @@
 - 群聊 / 私聊各自独立的 `all / whitelist / blacklist` 放行策略。
 - 管理员可私聊发 `/voice`（或 `/vc`）手动试听、查看状态、往指定群/QQ 发语音。
 - 触发词：群里 @ 机器人（或私聊）说「用语音」这类词，这条回复就改用语音，不改消息内容。
-- 可选「语音 + 文字并存」：同一条回复先发文字、再发语音（默认关，只发语音）。
+- 可选「语音 + 文字并存」：回复拆成文字 + 语音两条消息（默认关，只发语音）。
 - 内建定时语音：到点主动往指定群 / QQ 发一条语音（默认关）。
 - 对外 API `voice_say`：其他插件或脚本可以直接要一段语音，也可指定会话发送。
 - 合成前清洗文本（表情、引号、波浪号、省略号、重复标点），并用风格指令压住音色漂移；英文默认只删 `ww` / `emmm` 这类复读口癖，`LLM`、`token`、`cos` 等真词原样朗读。
@@ -186,7 +186,9 @@ keep_text = true
 text_first = true   # true = 先文字后语音；false = 先语音后文字
 ```
 
-文字是模型原始回复（未清洗），语音是清洗后的朗读版本，两者内容不完全相同。文字会等语音合成完再一起发，所以最坏情况下文字也要等 25 秒；合成失败时按 `fallback_to_text` 处理（默认只发文字，不额外说明）。
+文字是模型原始回复（未清洗），语音是清洗后的朗读版本，两者内容不完全相同。文字会等语音合成完再发，所以最坏情况下文字也要等 25 秒；合成失败时按 `fallback_to_text` 处理（默认只发文字，不额外说明）。
+
+文字和语音分**两条消息**发送：一条消息里混 `[文字, 语音]` 时，部分适配器只落地语音段（2026-11-16 线上实测），所以拆开。`text_first = false` 时文字在语音之后约 1.5 秒补发。
 
 ## 定时语音（0.6.0）
 
@@ -328,7 +330,7 @@ private_mode = "all"
 │   ├── timeout.py               # 失败归类
 │   ├── schedule.py              # 定时表的时间 / 星期解析
 │   └── commands.py              # /voice 解析与回执文案
-├── tests/                       # 359 条断言，不依赖 pytest
+├── tests/                       # 361 条断言，不依赖 pytest
 ├── config.example.toml
 ├── _manifest.json
 ├── assets/icon.svg              # 商店图标
@@ -392,10 +394,10 @@ private_mode = "all"
 
 ### 0.6.0
 
-- **语音 + 文字并存**（`delivery.keep_text`，默认关）：打开后同一条回复先发文字再发语音（`text_first = false` 可反序）；文字等语音就绪才发，合成失败只发文字。
+- **语音 + 文字并存**（`delivery.keep_text`，默认关）：打开后回复拆成两条消息——文字（模型原文）+ 语音（`text_first = false` 可反序）；文字等语音就绪才发，合成失败只发文字。
 - **内建定时语音**（`[scheduled]`，默认关）：到点主动往指定群 / QQ 发一条固定文本语音；`content` 预留了「模型现写」的位置。
 - **对外 API `voice_say`**：给 `stream_id` 就发送、不给只返回 base64；`api.token` 是可选共享口令（宿主不传调用方身份），并加全局调用间隔与长度上限。
-- 单测接入 CI：`.github/workflows/ci.yml` 在每次 push / PR 上跑 ruff、mypy 与 359 条断言。
+- 单测接入 CI：`.github/workflows/ci.yml` 在每次 push / PR 上跑 ruff、mypy 与 361 条断言。
 
 ### 0.5.6
 
@@ -432,7 +434,7 @@ python -c "import tomllib; tomllib.load(open('config.example.toml','rb'))"
 pip install -r requirements-dev.txt
 ruff check .
 mypy plugin.py core   # 需先装 maibot-plugin-sdk，否则基类被当作 Any，会漏掉 self.config 的类型问题
-python tests/run_all.py     # 十一组共 359 条断言（文本/音频/配置/超时/触发/命令/触发词/定时/并存/API）
+python tests/run_all.py     # 十一组共 361 条断言（文本/音频/配置/超时/触发/命令/触发词/定时/并存/API）
 ```
 
 Windows 上等价的一条命令：`pwsh -File tools/run_checks.ps1`（已处理控制台编码与临时目录的差异）。
