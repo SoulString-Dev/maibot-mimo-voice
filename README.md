@@ -136,8 +136,8 @@ MiMo 的限制不只是 RPM / TPM：**每个账号的 TTS 并发名额只有 1**
 | 命令 | 作用 |
 |---|---|
 | `/voice on` / `/voice off` | 开关**当前私聊会话**的自动语音（命令只能在私聊用，所以只会切私聊）；进程内有效，重启复位（全局开关仍是 `trigger.mode` 与放行策略） |
-| `/voice test <文本>` | 立刻朗读这段文本，发到当前私聊 |
-| `/voice say <目标> <文本>` | 把语音发到指定群或 QQ；目标写群号 / QQ 号，也可用 `g群号` / `uQQ号` 指定类型 |
+| `/voice test <文本>` | 立刻朗读这段文本，发到当前私聊（开 `keep_text` 时也发文字） |
+| `/voice say <目标> <文本>` | 把语音发到指定群或 QQ（开 `keep_text` 时也发文字）；目标写群号 / QQ 号，也可用 `g群号` / `uQQ号` 指定类型 |
 | `/voice status` | 版本、音色、触发参数、超时并发、本会话开关与近期合成耗时 |
 | `/voice help` | 命令帮助 |
 
@@ -189,6 +189,10 @@ text_first = true   # true = 先文字后语音；false = 先语音后文字
 文字是模型原始回复（未清洗），语音是清洗后的朗读版本，两者内容不完全相同。文字会等语音合成完再发，所以最坏情况下文字也要等 25 秒；合成失败时按 `fallback_to_text` 处理（默认只发文字，不额外说明）。
 
 文字和语音分**两条消息**发送：一条消息里混 `[文字, 语音]` 时，部分适配器只落地语音段（2026-11-16 线上实测），所以拆开。`text_first = false` 时文字在语音之后约 1.5 秒补发。
+
+自动转换、`/voice test`、`/voice say`、定时语音都吃这个开关；对外 API 不带文字（调用方自己决定怎么展示）。
+
+插件自己发出的文字（并存文字段、命令回执、定时文字）会在 10 秒内被认出来并跳过转换，避免「文字又触发一次语音」导致同一条回复连出两三条语音。
 
 ## 定时语音（0.6.0）
 
@@ -397,7 +401,8 @@ private_mode = "all"
 - **语音 + 文字并存**（`delivery.keep_text`，默认关）：打开后回复拆成两条消息——文字（模型原文）+ 语音（`text_first = false` 可反序）；文字等语音就绪才发，合成失败只发文字。
 - **内建定时语音**（`[scheduled]`，默认关）：到点主动往指定群 / QQ 发一条固定文本语音；`content` 预留了「模型现写」的位置。
 - **对外 API `voice_say`**：给 `stream_id` 就发送、不给只返回 base64；`api.token` 是可选共享口令（宿主不传调用方身份），并加全局调用间隔与长度上限。
-- 单测接入 CI：`.github/workflows/ci.yml` 在每次 push / PR 上跑 ruff、mypy 与 361 条断言。
+- 单测接入 CI：`.github/workflows/ci.yml` 在每次 push / PR 上跑 ruff、mypy 与 369 条断言。
+- 修复：自己发出的文字不再被当成模型回复转成语音（此前开 `keep_text` 时一条回复可能连出 2–3 条语音）；`/voice test`、`/voice say` 开 `keep_text` 时也带文字。
 
 ### 0.5.6
 
@@ -434,7 +439,7 @@ python -c "import tomllib; tomllib.load(open('config.example.toml','rb'))"
 pip install -r requirements-dev.txt
 ruff check .
 mypy plugin.py core   # 需先装 maibot-plugin-sdk，否则基类被当作 Any，会漏掉 self.config 的类型问题
-python tests/run_all.py     # 十一组共 361 条断言（文本/音频/配置/超时/触发/命令/触发词/定时/并存/API）
+python tests/run_all.py     # 十一组共 369 条断言（文本/音频/配置/超时/触发/命令/触发词/定时/并存/API）
 ```
 
 Windows 上等价的一条命令：`pwsh -File tools/run_checks.ps1`（已处理控制台编码与临时目录的差异）。

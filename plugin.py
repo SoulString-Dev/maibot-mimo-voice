@@ -86,6 +86,8 @@ from .core.constants import (
     _RETRYABLE_STATUS,
     _SCOPE_CACHE_MAX_ENTRIES,
     _SCOPE_TTL_SECONDS,
+    _SELF_SENT_MAX_ENTRIES,
+    _SELF_SENT_TEXT_TTL_SECONDS,
     _SILENCE_DBFS,
     _SOFT_LIMIT_CEILING,
     _TAIL_KEEP_SECONDS,
@@ -175,6 +177,9 @@ class MiMoVoicePlugin(MaiBotPlugin):
         self._trigger_last_hit: Dict[str, float] = {}
         # 并存（0.6.0）：文字与语音分两条发，语音先时用这个集合挂延迟发文字的任务
         self._pending_text_tasks: set[asyncio.Task] = set()
+        # 插件自己发出的文字（并存文字段 / 命令回执 / 定时文字）：(会话, 文字) -> 过期时间。
+        # 这些文字也会经过 send_service.before_send，认出来直接放行，不能再转成语音。
+        self._self_sent_texts: Dict[Tuple[str, str], float] = {}
 
     # ------------------------------------------------------------------ 生命周期
 
@@ -1439,6 +1444,9 @@ class MiMoVoicePlugin(MaiBotPlugin):
         stream_id = self._stream_id(outbound, kwargs)
         if not stream_id:
             return None
+        # 自己发的文字（并存文字段、命令回执、定时文字）原样放行，否则会被再转一次语音
+        if self._consume_self_sent(stream_id, text):
+            return None
 
         scope = str(outbound.get("scope") or "").strip()
         info = outbound.get("message_info")
@@ -1671,10 +1679,7 @@ class MiMoVoicePlugin(MaiBotPlugin):
 
     async def _command_reply(self, stream_id: str, text: str) -> None:
         """命令回执必须自己发：宿主只把 handler 的 response 写日志，不会替我们发出去。"""
-        try:
-            await self.ctx.send.text(text, stream_id)
-        except Exception as exc:
-            self.ctx.logger.warning("命令回执发送失败（%s）", exc)
+        await self._send_text(stream_id, text)
 
     async def _command_switch(self, stream_id: str, group_id: str, user_id: str, enabled: bool) -> None:
         # 没显式设置过时按开启算；所以首次 /voice on 回"已开启"，重复才回"本来就是开启的"
@@ -1743,7 +1748,7 @@ class MiMoVoicePlugin(MaiBotPlugin):
         if error:
             await self._command_reply(stream_id, error)
             return
-        if not await self._send_voice(stream_id, audio):
+        if not await self._deliver_voice(stream_id, raw, audio):
             await self._command_reply(stream_id, "语音发送失败，详细原因见日志。")
 
     async def _command_say(self, stream_id: str, rest: str, user_id: str, platform: str) -> None:
@@ -1776,7 +1781,7 @@ class MiMoVoicePlugin(MaiBotPlugin):
         if error:
             await self._command_reply(stream_id, error)
             return
-        if not await self._send_voice(target_stream, audio):
+        if not await self._deliver_voice(target_stream, raw_text, audio):
             await self._command_reply(stream_id, "语音发送失败，详细原因见日志。")
             return
         label = "群" if actual_kind == "group" else "私聊"
@@ -1948,13 +1953,9 @@ class MiMoVoicePlugin(MaiBotPlugin):
         except Exception as exc:
             self.ctx.logger.warning("定时语音失败（%s）：%s", label, exc)
             return
-        if self.config.delivery.keep_text and self.config.delivery.text_first:
-            await self._send_text(stream_id, raw)
-        if not await self._send_voice(stream_id, audio):
+        if not await self._deliver_voice(stream_id, raw, audio):
             self.ctx.logger.warning("定时语音发送失败：%s → %s", label, stream_id)
             return
-        if self.config.delivery.keep_text and not self.config.delivery.text_first:
-            await self._send_text(stream_id, raw)
         self.ctx.logger.info(
             "定时语音已发送：%s → %s（%d 字，%.1fs）",
             label,
@@ -1971,10 +1972,37 @@ class MiMoVoicePlugin(MaiBotPlugin):
         return await self._resolve_command_target(kind, ident, platform)
 
     async def _send_text(self, stream_id: str, text: str) -> None:
+        """发一条纯文字。先记一笔，避免它再经过出站钩子被转成语音。"""
+
+        self._remember_self_sent(stream_id, text)
         try:
             await self.ctx.send.text(text, stream_id=stream_id)
         except Exception as exc:
-            self.ctx.logger.warning("文字段发送失败（%s）", exc)
+            self.ctx.logger.warning("文字发送失败（%s）", exc)
+
+    def _remember_self_sent(self, stream_id: str, text: str) -> None:
+        now = time.monotonic()
+        for key, expiry in list(self._self_sent_texts.items()):
+            if expiry <= now:
+                self._self_sent_texts.pop(key, None)
+        self._self_sent_texts[(stream_id, text.strip())] = now + _SELF_SENT_TEXT_TTL_SECONDS
+        while len(self._self_sent_texts) > _SELF_SENT_MAX_ENTRIES:
+            self._self_sent_texts.pop(next(iter(self._self_sent_texts)))
+
+    def _consume_self_sent(self, stream_id: str, text: str) -> bool:
+        expiry = self._self_sent_texts.pop((stream_id, text.strip()), None)
+        return expiry is not None and expiry > time.monotonic()
+
+    async def _deliver_voice(self, stream_id: str, text: str, audio: bytes) -> bool:
+        """发语音；``delivery.keep_text`` 打开时文字另发一条（顺序看 ``text_first``）。"""
+
+        keep = self.config.delivery.keep_text
+        if keep and self.config.delivery.text_first:
+            await self._send_text(stream_id, text)
+        ok = await self._send_voice(stream_id, audio)
+        if ok and keep and not self.config.delivery.text_first:
+            self._spawn_text(stream_id, text)
+        return ok
 
     # ------------------------------------------------------------ 对外 API
 

@@ -105,8 +105,56 @@ def test_delivery(module) -> int:
     return check.report()
 
 
+def test_self_sent(module) -> int:
+    """自己发的文字不能再被转成语音（否则一条回复会连出 2–3 条语音）。"""
+
+    check = Checker("并存：自己发的文字不再转换")
+
+    plugin, _config, _logger = make_ready(module, delivery={"keep_text": True})
+    stub_synthesis(plugin, wav_bytes())
+
+    asyncio.run(plugin._send_text("s1", "已发送到群 123"))
+    check.equal("回执原样发出", plugin.ctx.send.texts, [("s1", "已发送到群 123")])
+    check.equal("同一段文字再进钩子时放行", convert(plugin, "已发送到群 123"), None)
+    check.equal(
+        "别段文字照常转换",
+        [s["type"] for s in convert(plugin, "另一句话")["modified_kwargs"]["message"]["raw_message"]],
+        ["voice"],
+    )
+
+    # 标记是一次性的：同一条文字第二次进来（真的是模型回复）仍要转换
+    asyncio.run(plugin._send_text("s1", "再来一次"))
+    convert(plugin, "再来一次")
+    again = convert(plugin, "再来一次")
+    check.equal("标记用后即删", again is not None, True)
+
+    # /voice test 在 keep_text 打开时也发文字
+    plugin, _config, _logger = make_ready(module, delivery={"keep_text": True})
+    stub_synthesis(plugin, wav_bytes())
+    asyncio.run(plugin._command_test("s1", "你好呀"))
+    check.equal("/voice test 发文字", plugin.ctx.send.texts, [("s1", "你好呀")])
+    check.equal("/voice test 发语音", len(plugin.ctx.send.hybrids), 1)
+
+    # /voice say 在 keep_text 打开时把文字发到目标会话
+    plugin, _config, _logger = make_ready(module, delivery={"keep_text": True})
+    stub_synthesis(plugin, wav_bytes())
+
+    async def fake_target(kind, ident, platform):
+        return "group:123", "group", ""
+
+    plugin.__dict__["_resolve_command_target"] = fake_target
+    asyncio.run(plugin._command_say("s1", "g123 你好呀", "10000002", "qq"))
+    check.equal(
+        "say 的文字发到目标",
+        [item for item in plugin.ctx.send.texts if item[0] == "group:123"],
+        [("group:123", "你好呀")],
+    )
+    check.equal("say 的语音发到目标", plugin.ctx.send.hybrids[0][0], "group:123")
+    return check.report()
+
+
 def run(module) -> int:
-    return test_delivery(module)
+    return test_delivery(module) + test_self_sent(module)
 
 
 if __name__ == "__main__":

@@ -18,6 +18,8 @@ README 只保留最新一版的要点。
 - **API 鉴权用 `api.token` 而非插件白名单**：宿主 `_cap_api_call` 只透传 `args["args"]`，不注入调用方身份，按插件 id 限制无法实现。`token` 留空 = 不校验；另加全局 `api.rate_limit_seconds`（默认 5 秒）与 `general.max_text_length` 长度上限。
 - 定时与 API 共用 `_resolve_stream`（`g` / `u` 前缀或自动判断），命令层的 `/voice say` 行为不变。
 - **并存改为两条消息**：一条消息里混 `[文字, 语音]` 时，部分适配器只落地语音段（2026-11-16 线上实测：四条回复的文字都没出现）。现在语音单独一条，文字用 `ctx.send.text` 另发；`text_first = false` 时文字延迟 1.5 秒补发，避免与语音抢顺序。
+- **自己发的文字不再被转成语音**：`ctx.send.text` 发出的文字会再次经过 `send_service.before_send`，此前被当成模型回复又转一次语音，导致开 `keep_text` 时一条回复连出 2–3 条语音（2026-11-17 群 864688950 实测），`/voice say` 的回执也会被读出来。现在发文字时按 `(会话, 文本)` 记一条 10 秒标记，再进钩子直接放行；标记一次性，用完即删。
+- `/voice test`、`/voice say` 与其它发送方式一致：开 `keep_text` 时也把文字一起发（`test` 发到当前私聊，`say` 发到目标会话）。定时语音与自动转换共用同一条发送路径（`_deliver_voice`）。
 
 ## [0.5.6] - 2026-11-11
 
