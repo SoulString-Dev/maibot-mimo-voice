@@ -334,7 +334,7 @@ private_mode = "all"
 │   ├── timeout.py               # 失败归类
 │   ├── schedule.py              # 定时表的时间 / 星期解析
 │   └── commands.py              # /voice 解析与回执文案
-├── tests/                       # 361 条断言，不依赖 pytest
+├── tests/                       # 369 条断言，不依赖 pytest
 ├── config.example.toml
 ├── _manifest.json
 ├── assets/icon.svg              # 商店图标
