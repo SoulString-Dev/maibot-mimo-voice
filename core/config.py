@@ -492,6 +492,13 @@ class SongsConfig(PluginConfigBase):
         default_factory=lambda: list(_INTENT_DEFAULT_PATTERNS),
         description="意图层触发正则（每条一行，Python re 语法）；命中后把候选歌名交给模型挑",
     )
+    intent_names: List[str] = Field(
+        default_factory=list,
+        description=(
+            "额外算作「点名」的称呼（bot 昵称通常会自动识别，这里补别名/黑话）；"
+            "群里文本包含任一个即视为点名，可不 @ 触发意图层"
+        ),
+    )
     require_mention: bool = Field(
         default=True,
         description="群里要求被 @ 或点名才触发意图层；关掉后只要正则命中就注入候选（误触发会变多）",

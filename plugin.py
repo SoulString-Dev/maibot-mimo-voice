@@ -25,6 +25,8 @@ import random
 import shutil
 import subprocess
 import time
+import tomllib
+import unicodedata
 import uuid
 import wave
 from datetime import datetime
@@ -67,6 +69,7 @@ from .core.constants import (
     _INTENT_ARMED_TTL_SECONDS,
     _INTENT_MIN_INTERVAL_SECONDS,
     _KEEP_TEXT_DELAY_SECONDS,
+    _MAIBOT_CONFIG_PATHS,
     _MAX_AUDIO_SECONDS,
     _MIN_AUDIO_BYTES,
     _MIN_AUDIO_SECONDS,
@@ -202,6 +205,8 @@ class MiMoVoicePlugin(MaiBotPlugin):
         self._song_tool_stamp: Optional[Tuple[int, int]] = None
         # 只在真的命中意图的那一轮把播放工具暴露给模型：session -> 过期时间
         self._intent_armed: Dict[str, float] = {}
+        # 「点名」识别的称呼集合（bot 昵称 + alias_names + 配置里的 intent_names）
+        self._mention_names: List[str] = []
 
     # ------------------------------------------------------------------ 生命周期
 
@@ -1353,6 +1358,52 @@ class MiMoVoicePlugin(MaiBotPlugin):
         self._intent_patterns_cache = (raw, patterns)
         return patterns
 
+    def _load_mention_names(self) -> List[str]:
+        """把宿主的 bot 昵称 / alias_names 与配置里的额外称呼合起来。
+
+        宿主的 ``is_mentioned`` 在 ``chat.receive.after_process`` 阶段还没算出来
+        （它要等 register_message 才补），所以点名判断得自己兜一层。
+        """
+        names: List[str] = []
+        for raw in self.config.songs.intent_names or []:
+            text = str(raw or "").strip()
+            if text:
+                names.append(text)
+        for path in _MAIBOT_CONFIG_PATHS:
+            try:
+                with open(path, "rb") as handle:
+                    data = tomllib.load(handle)
+            except (OSError, ValueError):
+                continue
+            bot = data.get("bot")
+            if not isinstance(bot, dict):
+                continue
+            for key in ("nickname", "alias_names"):
+                value = bot.get(key)
+                if isinstance(value, str) and value.strip():
+                    names.append(value.strip())
+                elif isinstance(value, list):
+                    names.extend(str(item).strip() for item in value if str(item).strip())
+            break
+        # 去重、去掉过短的（单字称呼几乎必定误伤）
+        seen: List[str] = []
+        for name in names:
+            if len(name) >= 2 and name not in seen:
+                seen.append(name)
+        return seen
+
+    @staticmethod
+    def _text_mentions_bot(text: str, names: List[str]) -> bool:
+        body = unicodedata.normalize("NFKC", str(text or "")).lower()
+        return any(name.lower() in body for name in names)
+
+    def _cue_mentions_bot(self, text: str, payload: Dict[str, Any]) -> bool:
+        if payload.get("is_at") or payload.get("is_mentioned"):
+            return True
+        if not self._mention_names:
+            self._mention_names = self._load_mention_names()
+        return self._text_mentions_bot(text, self._mention_names)
+
     def _song_cue(self, session_id: str) -> Optional[Dict[str, Any]]:
         """取本会话最近一条入站线索（文本 + @ 状态），过期即丢。"""
         entry = self._song_cues.get(session_id)
@@ -1404,7 +1455,7 @@ class MiMoVoicePlugin(MaiBotPlugin):
                 "group_id": group_id,
                 "user_id": str(user_info.get("user_id") or ""),
                 "is_at": bool(payload.get("is_at")),
-                "is_mentioned": bool(payload.get("is_mentioned")),
+                "is_mentioned": self._cue_mentions_bot(text, payload),
             },
         )
 

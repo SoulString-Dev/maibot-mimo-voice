@@ -111,6 +111,8 @@ _SONG_CUE_TTL_SECONDS = 180.0
 _INTENT_MIN_INTERVAL_SECONDS = 30.0
 # 命中意图后播放工具的可见窗口（秒）
 _INTENT_ARMED_TTL_SECONDS = 120.0
+# 宿主配置里能读到 bot 昵称时的候选路径（容器内 / 本地开发）
+_MAIBOT_CONFIG_PATHS = ("/MaiMBot/config/bot_config.toml", "config/bot_config.toml")
 
 # 并存（0.6.0）：文字与语音分两条消息发。一条消息里混 [text, voice] 时，适配器可能只
 # 落地语音段（2026-11-16 线上实测），所以语音先时等这么久再补文字，避免两条抢顺序。

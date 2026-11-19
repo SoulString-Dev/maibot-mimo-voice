@@ -177,6 +177,21 @@ with temp_dir() as root:
 with temp_dir() as root:
     root = Path(root)
     seed_library(root, [("雨爱", [], [])])
+    plugin, config, _logger = make(root, intent_names=["小鲸鱼"])
+    cue(plugin, "小鲸鱼，来首雨爱", is_at=False, is_mentioned=False)
+    note = note_of(inject(plugin))
+    checker.check("文本里点名也能注入", "雨爱" in note, note)
+
+with temp_dir() as root:
+    root = Path(root)
+    seed_library(root, [("雨爱", [], [])])
+    plugin, config, _logger = make(root, intent_names=["小鲸鱼"])
+    cue(plugin, "来首雨爱", is_at=False, is_mentioned=False)
+    checker.check("只说歌不提名不注入", inject(plugin) is None)
+
+with temp_dir() as root:
+    root = Path(root)
+    seed_library(root, [("雨爱", [], [])])
     plugin, config, _logger = make(root, require_mention=False)
     cue(plugin, "唱一首雨爱", is_at=False, is_mentioned=False)
     note = note_of(inject(plugin))
