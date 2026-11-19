@@ -106,6 +106,10 @@ _REFERENCE_MAX_BYTES = int(9.5 * 1024 * 1024)
 _TRIGGER_TTL_MARGIN_SECONDS = 10.0
 _TRIGGER_MIN_INTERVAL_SECONDS = 5.0
 
+# 意图层（0.7.0）：入站线索（文本 + @ 状态）保留多久等 planner 来取；同一会话最多多久注入一次候选
+_SONG_CUE_TTL_SECONDS = 180.0
+_INTENT_MIN_INTERVAL_SECONDS = 30.0
+
 # 并存（0.6.0）：文字与语音分两条消息发。一条消息里混 [text, voice] 时，适配器可能只
 # 落地语音段（2026-11-16 线上实测），所以语音先时等这么久再补文字，避免两条抢顺序。
 _KEEP_TEXT_DELAY_SECONDS = 1.5

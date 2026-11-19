@@ -25,6 +25,7 @@ import random
 import shutil
 import subprocess
 import time
+import uuid
 import wave
 from datetime import datetime
 from pathlib import Path
@@ -38,6 +39,7 @@ from maibot_sdk.types import ErrorPolicy, HookMode, HookOrder
 from .core import commands as _commands
 from .core import config as _config
 from .core import schedule as _schedule
+from .core import song_intent as _song_intent
 from .core import song_library as _songs
 from .core import song_media as _song_media
 from .core import text as _text
@@ -62,6 +64,7 @@ from .core.constants import (
     _AUDIO_SECONDS_CAP,
     _AUDIO_SECONDS_PER_CHAR,
     _FFMPEG_BIN,
+    _INTENT_MIN_INTERVAL_SECONDS,
     _KEEP_TEXT_DELAY_SECONDS,
     _MAX_AUDIO_SECONDS,
     _MIN_AUDIO_BYTES,
@@ -92,6 +95,7 @@ from .core.constants import (
     _SELF_SENT_TEXT_TTL_SECONDS,
     _SILENCE_DBFS,
     _SOFT_LIMIT_CEILING,
+    _SONG_CUE_TTL_SECONDS,
     _TAIL_KEEP_SECONDS,
     _TIMBRE_FULL_STRENGTH_DB,
     _TIMBRE_MAX_GAIN_DB,
@@ -190,6 +194,11 @@ class MiMoVoicePlugin(MaiBotPlugin):
         self._consumed_media: Dict[str, float] = {}
         self._sing_group_last: Dict[str, float] = {}
         self._sing_user_last: Dict[str, float] = {}
+        # 意图层（0.7.0）：会话 -> (过期时间, 入站线索)；planner 请求前消费一次
+        self._song_cues: Dict[str, Tuple[float, Dict[str, Any]]] = {}
+        self._intent_last: Dict[str, float] = {}
+        self._intent_patterns_cache: Optional[Tuple[Tuple[str, ...], List[Any]]] = None
+        self._song_tool_stamp: Optional[Tuple[int, int]] = None
 
     # ------------------------------------------------------------------ 生命周期
 
@@ -1327,6 +1336,158 @@ class MiMoVoicePlugin(MaiBotPlugin):
         if path is not None:
             _songs.save_library(path, songs)
 
+    # ------------------------------------------------------- 意图层（0.7.0）
+
+    def _intent_patterns(self) -> List[Any]:
+        """编译后的点歌正则；配置里写错的行跳过并只告警一次。"""
+        raw = tuple(str(item or "") for item in (self.config.songs.intent_patterns or []))
+        cached = self._intent_patterns_cache
+        if cached is not None and cached[0] == raw:
+            return cached[1]
+        patterns, warnings = _song_intent.compile_patterns(list(raw))
+        for message in warnings:
+            self._warn_once(f"intent:{message}", "%s", message)
+        self._intent_patterns_cache = (raw, patterns)
+        return patterns
+
+    def _song_cue(self, session_id: str) -> Optional[Dict[str, Any]]:
+        """取本会话最近一条入站线索（文本 + @ 状态），过期即丢。"""
+        entry = self._song_cues.get(session_id)
+        if entry is None:
+            return None
+        expires_at, cue = entry
+        if expires_at < time.monotonic():
+            self._song_cues.pop(session_id, None)
+            return None
+        return cue
+
+    @HookHandler(
+        "chat.receive.after_process",
+        name="mimo_voice_song_cue",
+        description="记下一条可能是点歌的入站消息（文本与 @ 状态），planner 请求前消费（OBSERVE）",
+        mode=HookMode.OBSERVE,
+        order=HookOrder.LATE,
+    )
+    async def remember_song_cue(self, message: Optional[Dict[str, Any]] = None, **kwargs: Any) -> None:
+        if not self._songs_enabled():
+            return
+        payload = message if isinstance(message, dict) else {}
+        text = str(payload.get("processed_plain_text") or payload.get("plain_text") or "").strip()
+        if not text or text[0] in ("/", "／"):
+            return
+        session_id = str(payload.get("session_id") or kwargs.get("stream_id") or "").strip()
+        if not session_id:
+            return
+        info = payload.get("message_info")
+        info = info if isinstance(info, dict) else {}
+        group_info = info.get("group_info")
+        group_info = group_info if isinstance(group_info, dict) else {}
+        user_info = info.get("user_info")
+        user_info = user_info if isinstance(user_info, dict) else {}
+        scope = str(payload.get("scope") or "").strip()
+        group_id = str(group_info.get("group_id") or "").strip()
+        if not scope:
+            scope = "group" if group_id else "private"
+        now = time.monotonic()
+        if len(self._song_cues) > _TTL_CACHE_MAX_ENTRIES:
+            self._song_cues = {key: value for key, value in self._song_cues.items() if value[0] >= now}
+            if len(self._song_cues) > _TTL_CACHE_MAX_ENTRIES:
+                self._song_cues.clear()
+        self._song_cues[session_id] = (
+            now + _SONG_CUE_TTL_SECONDS,
+            {
+                "text": text,
+                "scope": scope,
+                "group_id": group_id,
+                "user_id": str(user_info.get("user_id") or ""),
+                "is_at": bool(payload.get("is_at")),
+                "is_mentioned": bool(payload.get("is_mentioned")),
+            },
+        )
+
+    @HookHandler(
+        "maisaka.planner.before_request",
+        name="mimo_voice_song_intent",
+        description="命中点歌正则时，把曲库候选注入本轮 planner 请求（不拦截、不改写用户消息）",
+        mode=HookMode.BLOCKING,
+        order=HookOrder.NORMAL,
+        error_policy=ErrorPolicy.SKIP,
+    )
+    async def inject_song_intent(self, **kwargs: Any) -> Optional[Dict[str, Any]]:
+        if not self._songs_enabled():
+            return None
+        session_id = str(kwargs.get("session_id") or "").strip()
+        if not session_id:
+            return None
+        cue = self._song_cue(session_id)
+        if cue is None:
+            return None
+        scope = str(cue.get("scope") or "")
+        group_id = str(cue.get("group_id") or "")
+        user_id = str(cue.get("user_id") or "")
+        if not self._filter_allows(scope, group_id, user_id):
+            return None
+        is_group = scope == "group"
+        if is_group and self.config.songs.require_mention and not (cue.get("is_at") or cue.get("is_mentioned")):
+            return None
+        hit = _song_intent.match_intent(str(cue.get("text") or ""), self._intent_patterns())
+        if hit is None:
+            return None
+        now = time.monotonic()
+        if now - self._intent_last.get(session_id, 0.0) < _INTENT_MIN_INTERVAL_SECONDS:
+            return None
+        songs = self._load_songs()
+        if not songs:
+            return None
+        matches = _songs.match_songs(songs, hit.keyword) if hit.keyword else []
+        matched_ids = {song.id for song in matches}
+        ordered = list(matches) + [song for song in songs if song.id not in matched_ids]
+        limit = max(1, int(self.config.songs.intent_candidates))
+        candidates = [song.label() for song in ordered[:limit]]
+        note = _song_intent.build_hint(candidates, hit.keyword, limit)
+        items = kwargs.get("items")
+        if not isinstance(items, list):
+            return None
+        inserted = _song_intent.append_hint(
+            items,
+            note,
+            item_id=f"mimo-voice-song-{uuid.uuid4().hex}",
+            timestamp=datetime.now().astimezone().isoformat(),
+        )
+        if not inserted:
+            return None
+        self._intent_last[session_id] = now
+        self._song_cues.pop(session_id, None)
+        if len(self._intent_last) > _TTL_CACHE_MAX_ENTRIES:
+            self._intent_last.clear()
+        reason = "at" if cue.get("is_at") else ("mentioned" if cue.get("is_mentioned") else "private")
+        self.ctx.logger.info(
+            "已向 planner 注入点歌候选（会话 %s，原因=%s，正则=%r，关键词=%r，候选=%d）",
+            session_id,
+            reason,
+            hit.pattern,
+            hit.keyword,
+            len(candidates),
+        )
+        kwargs["items"] = items
+        return {"action": "continue", "modified_kwargs": kwargs}
+
+    def _song_tool_ready(self) -> bool:
+        """曲库非空才把播放工具暴露给模型；没有歌的时候它只会误导模型。"""
+        if not self._songs_enabled():
+            return False
+        root = self._songs_root()
+        path = self._songs_file()
+        if root is None or path is None:
+            return False
+        stamp = (path.stat().st_mtime_ns if path.exists() else 0, len(self._load_songs()))
+        cached = getattr(self, "_song_tool_stamp", None)
+        if cached is not None and cached == stamp:
+            return bool(stamp[1])
+        self._song_tool_stamp = stamp
+        return bool(stamp[1])
+
+
     @HookHandler(
         "chat.receive.after_process",
         name="mimo_voice_collect_song_media",
@@ -2262,6 +2423,7 @@ class MiMoVoicePlugin(MaiBotPlugin):
 
     _TOOL_TEXT_REPLY = "mimo_voice_text_reply"
     _TOOL_VOICE_SAY = "mimo_voice_say"
+    _TOOL_PLAY_SONG = "mimo_voice_play_song"
 
     @HookHandler(
         "maisaka.planner.before_request",
@@ -2282,6 +2444,9 @@ class MiMoVoicePlugin(MaiBotPlugin):
             "random_llm": {self._TOOL_VOICE_SAY},
         }.get(self.config.trigger.mode, set())
         hidden = {self._TOOL_TEXT_REPLY, self._TOOL_VOICE_SAY} - allowed
+        # 曲库为空（或功能没开）时不暴露播放工具：模型看到它就只会瞎编歌名
+        if not self._song_tool_ready():
+            hidden.add(self._TOOL_PLAY_SONG)
         if not hidden:
             return None
         tools = [definition for definition in tool_definitions if self._tool_definition_name(definition) not in hidden]
@@ -2329,6 +2494,68 @@ class MiMoVoicePlugin(MaiBotPlugin):
         self._prune_ttl_cache(self._llm_voice_requests)
         self._text_override_sessions.pop(stream_id, None)
         return {"success": True, "content": "这一轮会用语音回复，正常给出回复内容即可。"}
+
+    @Tool(
+        "mimo_voice_play_song",
+        description=(
+            "从本地曲库挑一首歌，直接以语音条发到当前会话。只有当用户明确点了歌、"
+            "且歌名出现在上下文给出的曲库候选里时才调用；曲库里没有的歌不要调用。"
+        ),
+        visibility="visible",
+        parameters={
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "曲库里的歌名，原样照抄候选列表（别名也可以，但歌名最稳）",
+                }
+            },
+            "required": ["name"],
+        },
+    )
+    async def play_song(self, **kwargs: Any) -> Dict[str, Any]:
+        """意图层的落地点：模型点歌 → 这里直接发语音条，不依赖标记文本。"""
+        stream_id = str(kwargs.get("stream_id") or kwargs.get("session_id") or "").strip()
+        name = str(kwargs.get("name") or "").strip()
+        if not stream_id:
+            return {"success": False, "content": "无法获取当前会话，直接用文字回复。"}
+        if not self._songs_enabled():
+            return {"success": False, "content": "曲库没开启，直接用文字回复。"}
+        if not name:
+            return {"success": False, "content": "缺少歌名。"}
+        matches = _songs.match_songs(self._load_songs(), name)
+        if not matches:
+            return {
+                "success": False,
+                "content": f"曲库里没有「{name}」，不要编造，直接告诉对方曲库里没有这首。",
+            }
+        song = random.choice(matches)
+        cached = self._lookup_scope(stream_id)
+        blocked = self._sing_cooldown(stream_id, str(cached.get("user_id") or ""))
+        if blocked:
+            return {"success": False, "content": f"{blocked}，用文字说明即可。"}
+        root = self._songs_root()
+        path = root / song.file if root is not None else None
+        if path is None:
+            return {"success": False, "content": "找不到曲库目录，直接用文字回复。"}
+        try:
+            audio = await asyncio.to_thread(path.read_bytes)
+        except OSError as exc:
+            self.ctx.logger.warning("点歌读取音频失败（%s）：%s", song.file, exc)
+            return {"success": False, "content": "音频文件读不出来，改用文字告诉对方。"}
+        delivered = await self._send_voice(stream_id, audio)
+        if not delivered:
+            return {"success": False, "content": "语音发送失败了，用文字解释一下。"}
+        self.ctx.logger.info(
+            "意图层点歌已发送（会话 %s，歌名=%s，来源=%s）",
+            stream_id,
+            song.name,
+            song.file,
+        )
+        return {
+            "success": True,
+            "content": f"已把「{song.name}」作为语音条发出，不必再把歌名念一遍，也不用说自己在唱。",
+        }
 
     # ---------------------------------------------------------- 手动命令（0.5.5）
 

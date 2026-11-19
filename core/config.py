@@ -11,6 +11,7 @@ from pydantic import field_validator, model_validator
 
 from . import schedule as _schedule
 from .constants import _DEFAULT_API_BASE, DEFAULT_STYLE_INSTRUCTION, PRESET_ALIASES
+from .song_intent import DEFAULT_PATTERNS as _INTENT_DEFAULT_PATTERNS
 
 _CONFIG_WARNINGS: List[str] = []
 
@@ -487,7 +488,14 @@ class SongsConfig(PluginConfigBase):
             "再调 file.get_*_file_url 换下载链接。关掉后只认语音条（和自带链接的文件）"
         ),
     )
-    trigger_words: str = Field(default="", description="意图层触发词，逗号分隔；空=只走命令，不注入候选")
+    intent_patterns: List[str] = Field(
+        default_factory=lambda: list(_INTENT_DEFAULT_PATTERNS),
+        description="意图层触发正则（每条一行，Python re 语法）；命中后把候选歌名交给模型挑",
+    )
+    require_mention: bool = Field(
+        default=True,
+        description="群里要求被 @ 或点名才触发意图层；关掉后只要正则命中就注入候选（误触发会变多）",
+    )
     intent_candidates: int = Field(default=5, ge=1, le=10, description="意图层最多给模型几条候选")
     sing_group_cooldown_seconds: float = Field(default=30.0, ge=0.0, le=600.0, description="同一会话点歌的冷却（秒）")
     sing_user_cooldown_seconds: float = Field(default=10.0, ge=0.0, le=600.0, description="同一个人点歌的冷却（秒）")
