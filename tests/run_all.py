@@ -5,15 +5,25 @@
 """
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
+# 子进程强制 UTF-8：Windows 默认 GBK 控制台会让测试里的 emoji 直接 UnicodeEncodeError。
+CHILD_ENV = {**os.environ, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"}
 SUITES = ["test_text.py", "test_audio.py", "test_config.py", "test_timeout.py", "test_trigger.py", "test_commands.py", "test_triggers.py", "test_schedule.py", "test_delivery.py", "test_api.py", "test_scheduled.py"]
 
 
 def main() -> int:
+    # GBK 控制台（Windows 默认）碰到测试里的 emoji / 替换字符会 UnicodeEncodeError 崩掉，
+    # 这里把不可编码字符降级成 ?，避免「测试全过但汇总脚本自己挂了」。
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            reconfigure(errors="replace")
+
     failed: list[tuple[str, str]] = []
     for name in SUITES:
         path = HERE / name
@@ -24,6 +34,7 @@ def main() -> int:
             text=True,
             encoding="utf-8",
             errors="replace",
+            env=CHILD_ENV,
         )
         output = (result.stdout or "") + (result.stderr or "")
         print(output.rstrip())

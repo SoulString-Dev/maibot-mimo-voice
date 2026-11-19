@@ -1,12 +1,12 @@
 # 维护手记
 
-> 写给以后还想继续把它做得更好的自己。商店最新可装 **0.5.6**（11-09 23:09 发版，tag/Release = `f519fa0`，Release id `439280802`；11-10 01:33 自动收录 #1544，`decision=pass`、`risks=[]`；上一版 0.5.4 = `0ab88e2`，11-08 05:46 收录 #1496；再上一版 0.5.3 = `c8d935b`，11-01 05:19 收录 #1256）；NAS 上 11-07 22:01 铺的是 0.5.4= **一条语音只发一次请求 + 固定 25 秒超时**（删除 p80 自适应与超时补发）+ 埋点补字数/音频时长/触发来源 + 「可爱少女」参考换成原样 8.41 秒版 + 点名优先与情绪加权（默认关，线上开）+ 情绪判定改用清洗前的原始回复，11-09 22:53 起又叠上 0.5.5 命令层。
+> 写给以后还想继续把它做得更好的自己。商店最新可装 **0.6.0**（11-18 13:16 发版，tag/Release `6606dce`，Release id `449554364`；11-19 00:39 自动收录，审核单 [#1724](https://github.com/Mai-with-u/plugin-repo/issues/1724)，`decision=pass`、`risks=[]`）；上一版 0.5.6 = `accced2`（11-11 07:13 收录 [#1584](https://github.com/Mai-with-u/plugin-repo/issues/1584)）、0.5.5 = `f519fa0`（11-10 01:33 收录 #1544）、0.5.4 = `0ab88e2`（11-08 05:46 收录 #1496）。
 >
-> 已确认的上游限制：MiMo 每个账号的 TTS 并发名额只有 1，客户端超时后服务端仍在生成（探针最长 72.7 秒），超时后重发必 429（0.3–0.5 秒内被拒）。所以「重发」「自适应等更久」都不再有意义，见 `maibot-voice/docs/analysis-dual-draft.md` 与 README 的「429 与超时」。
+> 0.6.0 内容：语音 + 文字并存（`delivery.keep_text`，默认关）、内建定时语音（`[scheduled]`，默认关）、对外 API `voice_say`（`api.token` 共享口令 + 全局限流）、单测接入 CI；设计见 `docs/superpowers/specs/2026-11-11-voice-0.6.0-design.md`，计划见 `docs/superpowers/plans/2026-11-11-voice-0.6.0.md`；11 个文件 369 条断言全绿。11-16/11-17 两处线上修正：并存改成文字、语音各一条（混合数组部分适配器只落地语音段）；插件自己发出的文字按 `(会话, 文本)` 记 10 秒标记、不再被转成语音（此前 `keep_text` 会连出 2–3 条语音、`/voice say` 回执也会被读出来），`/voice test|say` 开 `keep_text` 时也带文字。
 >
-**0.6.0 已发版并收录（11-18 13:16 发版，tag/Release `6606dce`，Release id `449554364`；11-19 00:39 收录，审核单 [#1724](https://github.com/Mai-with-u/plugin-repo/issues/1724)）**：语音 + 文字并存（`delivery.keep_text`，默认关）、内建定时语音（`[scheduled]`，默认关）、对外 API `voice_say`（`api.token` 共享口令 + 全局限流）、单测接入 CI；设计见 `docs/superpowers/specs/2026-11-11-voice-0.6.0-design.md`，计划见 `docs/superpowers/plans/2026-11-11-voice-0.6.0.md`；11 个文件 369 条断言全绿。11-16/11-17 两处线上修正：并存改成文字、语音各一条（混合数组部分适配器只落地语音段）；插件自己发出的文字按 `(会话, 文本)` 记 10 秒标记、不再被转成语音（此前 `keep_text` 会连出 2–3 条语音、`/voice say` 回执也会被读出来），`/voice test|say` 开 `keep_text` 时也带文字。
-> 0.5.6（11-11 01:01 发版，tag/Release `accced2`，Release id `440650886`；11-11 07:13 自动收录 #1584，`pass`/`risks=[]`）：触发词引擎 + 点名/情绪加权默认开 + 默认规则「用语音 / 任意」，281 条测试全绿，11-11 00:49 已铺 NAS。
-> 0.5.5（tag/Release `f519fa0`，Release id `439280802`）已实现命令层（`/voice|/vc` 的 `on` / `off` / `test` / `status` / `say` / `help`，**只在私聊、只对 `commands.admins` 生效**，方案与实现见 `maibot-voice/docs/commands-0.5.5.md`）：228 条测试全绿，11-09 22:53 已铺 NAS；商店 11-10 01:33 自动收录（审核单 #1544）。再往后 0.6.x 计划做纯 Python 参考烘焙 + 内置音色扩充（`voice.pitch` 三档在 10-31 实测全部失败，已不做，见 `docs/roadmap.md`）；熔断仍未做，等失败簇数据。
+> 已确认的上游限制：MiMo 每个账号的 TTS 并发名额只有 1，客户端超时后服务端仍在生成（探针最长 72.7 秒），超时后重发必 429（0.3–0.5 秒内被拒）。所以「重发」「自适应等更久」都不再有意义，见 cross-repo `docs/analysis-dual-draft.md` 与 README 的「429 与超时」。
+>
+> NAS：11-11 23:19 铺过 0.6.0 开发版（`dcf46f8`）；11-16/11-17 修正后的 `6606dce` 是否已重铺未核对。0.6.x 计划做纯 Python 参考烘焙 + 内置音色扩充（`voice.pitch` 三档在 10-31 实测全部失败，已不做）；熔断仍未做，等失败簇数据。
 
 ## 1. 这是什么，在哪
 
@@ -18,7 +18,7 @@
 | 上游 | fork 自 `Ling-LA/ling-tts-bot`（MIT，保留版权声明） |
 | 部署形态 | 放进麦麦插件目录；自定义参考音频放插件**数据目录**的 `references/` |
 
-运行形态：hook `send_service.before_send` 把出站纯文本改写成 `voice` 段。**不需要**适配器私有 API，也不需要声明 capability（`capabilities: []` 是最干净的资产，别轻易破坏）。
+运行形态：hook `send_service.before_send` 把出站纯文本改写成 `voice` 段。**不需要**适配器私有 API；manifest 只声明真正用到的 5 项能力（`send.text`、`send.hybrid`、`chat.get_stream_by_group_id`、`chat.get_stream_by_user_id`、`chat.open_session`），多声明一项就多一份审核风险。
 
 ## 2. 发版流程
 
@@ -31,6 +31,7 @@ git tag -a vX.Y.Z -m "vX.Y.Z" && git push origin vX.Y.Z   # 版本号必须与 _
 ```
 
 发完**不用**手动提商店申请：索引 cron（UTC `0 7,18`，北京 15:00 / 02:00）会自动发现新 Release → 建 `[Release]` issue → 打 `validated` → 机器审核；零风险自动写进 `plugin_versions.json`。
+- Windows 上别用 scoop 装的 niugit：`git push` 会报 `schannel: AcquireCredentialsHandle failed: SEC_E_NO_CREDENTIALS`，改用 `"C:/Program Files/Git/cmd/git.exe" -c credential.helper= …`（origin URL 内嵌 token）。
 
 ### 发版铁律
 
@@ -79,9 +80,9 @@ git tag -a vX.Y.Z -m "vX.Y.Z" && git push origin vX.Y.Z   # 版本号必须与 _
 ## 5. 部署与验证
 
 ```bash
-tar czf /tmp/mv.tgz plugin.py core config.example.toml README.md _manifest.json tools/build_reference.sh
-scp -O -P <ssh端口> /tmp/mv.tgz user@<nas>:/tmp/
-ssh -p <ssh端口> user@<nas> "cd <部署目录> && tar xzf /tmp/mv.tgz && sudo chown -R 1000:1000 ."
+tar czf /tmp/mv.tgz plugin.py core presets config.example.toml README.md _manifest.json   # presets/ 从 0.5.3 起必带
+scp -O -P <ssh端口> /tmp/mv.tgz user@<nas>:/tmp/   # 没有 scp 时：cat /tmp/mv.tgz | ssh … 'cat > /tmp/mv.tgz'
+ssh -p <ssh端口> user@<nas> "cd <部署目录> && tar xzf /tmp/mv.tgz && find . -name __pycache__ -type d -exec rm -rf {} + && sudo chown -R 1000:1000 ."
 ```
 
 - 文件监视会自动热重载；整套重启用 `sudo docker restart maim-bot-core`。
@@ -111,7 +112,7 @@ ssh -p <ssh端口> user@<nas> "cd <部署目录> && tar xzf /tmp/mv.tgz && sudo 
 
 1. **纯 Python 参考音频加工**（彻底去 ffmpeg）：重采样/变调/裁静音/淡入淡出/响度归一，上传即生成多档音高供下拉。0.5.2 的 `prepare_reference` 已覆盖"切句 + 拼接 + 响度归一"，0.6.0 只差重采样与 WSOLA 变调。
 2. **超时策略已收敛（0.5.4）**：一条语音一次请求、固定 25 秒、失败即回退文字。p80 自适应（0.5.3）与超时补发都在 11-06 删除——MiMo 每账号 TTS 并发名额只有 1，重发必撞 429（见 cross-repo `docs/analysis-dual-draft.md`）。熔断仍未做，等失败簇数据。
-3. **继续拆分**：`plugin.py` 已经把文案/配置/音频拆进 `core/`（约 1130 行）；下一步是把 TTS 请求与参考音频管理也搬出去，仍作为"只拆分不带功能改动"的补丁版本。
+3. **继续拆分**：`plugin.py` 已经把文案/配置/音频/触发词/命令/定时拆进 `core/`（`plugin.py` 仍有约 2100 行）；下一步是把 TTS 请求与参考音频管理也搬出去，仍作为"只拆分不带功能改动"的补丁版本。
 4. 产品侧：商店页放样音、英文 README。
 5. 已评估**不做**：本地音频缓存、RVC/翻唱（无 GPU）、用提示词管英文（实测无效且会改坏内容）、**双候选自动选优**（8 个客观指标与人工标注重叠，选一≈抛硬币，见 cross-repo `docs/roadmap.md` §5.6 / 项目总览 §3.2）。
 
