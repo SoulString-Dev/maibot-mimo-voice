@@ -6,6 +6,7 @@ import base64
 import io
 import json
 import sys
+import time
 import wave
 from pathlib import Path
 
@@ -304,5 +305,39 @@ with temp_dir() as root:
     denied = {"success": False, "error": "插件 xxx 未获授权能力: api.call"}
     checker.equal("拒绝时返回 None", plugin._unwrap_adapter_response(denied, "z"), None)
     checker.equal("无法识别返回 None", plugin._unwrap_adapter_response("oops", "w"), None)
+
+# ---------------------------------------------------------------- add 的历史兜底
+with temp_dir() as root:
+    plugin, config, _logger = make(Path(root))
+    history = {
+        "messages": [
+            {
+                "user_id": "456",
+                "sender": {"nickname": "Miu"},
+                "message_id": "m1",
+                "time": time.time(),
+                "message": [
+                    {"type": "file", "data": {"file": "雨爱.mp3", "file_size": "1234", "file_id": "FID-9"}}
+                ],
+            }
+        ]
+    }
+
+    async def fake_call(api_name: str, params):
+        if api_name.endswith("get_friend_msg_history"):
+            return history
+        if api_name.endswith("get_private_file_url"):
+            return {"url": "http://1.2.3.4:80/a.mp3"}
+        return None
+
+    async def fake_download(url: str) -> bytes:
+        return wav_bytes(1.0)
+
+    plugin._call_adapter_api = fake_call
+    plugin._download_media = fake_download
+    reply = private(plugin, "/voice sing add 雨爱")
+    checker.check("历史兜底入库", "已入库" in reply, reply)
+    songs, _warnings = lib.load_library(Path(root) / "songs" / "songs.json")
+    checker.equal("兜底后曲库 1 首", len(songs), 1)
 
 sys.exit(checker.report())

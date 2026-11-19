@@ -1679,11 +1679,87 @@ class MiMoVoicePlugin(MaiBotPlugin):
         elif action == "sing":
             await self._sing_play(stream_id, songs, name, user_id)
         elif action in ("add", "addforce"):
-            await self._sing_add(stream_id, songs, name, force=action == "addforce", user_id=user_id)
+            await self._sing_add(
+                stream_id, songs, name, force=action == "addforce", user_id=user_id, group_id=group_id
+            )
         elif action == "del":
             await self._sing_delete(stream_id, songs, name)
         elif action == "set":
             await self._sing_set(stream_id, songs, name, field_name, value)
+
+    async def _stash_latest_file_from_history(
+        self, *, group_id: str, user_id: str, session_id: str
+    ) -> Optional[Any]:
+        """``add`` 时的兜底：从最近历史里取本人在窗口内发的音频文件，现下载现暂存。
+
+        正常路径是入站钩子已经落盘；这里只处理漏网的情况（插件刚重启、适配器没给链接）。
+        """
+        config = self.config.songs
+        pool = self._pending_pool()
+        if pool is None or not config.lookup_file_url:
+            return None
+        if group_id:
+            history = await self._call_adapter_api(
+                "adapter.napcat.message.get_group_msg_history", {"group_id": group_id, "count": 10}
+            )
+        else:
+            history = await self._call_adapter_api(
+                "adapter.napcat.message.get_friend_msg_history", {"user_id": user_id, "count": 10}
+            )
+        messages = history.get("messages") if isinstance(history, dict) else history
+        if not isinstance(messages, list):
+            return None
+        now = time.time()
+        window = float(config.add_window_seconds)
+        for message in reversed(messages):
+            if not isinstance(message, dict):
+                continue
+            if user_id and str(message.get("user_id") or "") != str(user_id):
+                continue
+            stamp = float(message.get("time") or 0.0)
+            if stamp and now - stamp > window:
+                continue
+            segments = message.get("message")
+            if not isinstance(segments, list):
+                continue
+            for segment in segments:
+                if not isinstance(segment, dict) or str(segment.get("type") or "") != "file":
+                    continue
+                data = segment.get("data")
+                data = data if isinstance(data, dict) else {}
+                file_name = str(data.get("file") or "")
+                ext = _song_media.guess_extension(file_name)
+                file_id = str(data.get("file_id") or "").strip()
+                if not ext or not file_id:
+                    continue
+                if group_id:
+                    detail = await self._call_adapter_api(
+                        "adapter.napcat.file.get_group_file_url", {"group_id": group_id, "file_id": file_id}
+                    )
+                else:
+                    detail = await self._call_adapter_api(
+                        "adapter.napcat.file.get_private_file_url", {"file_id": file_id}
+                    )
+                url = str(detail.get("url") or "").strip() if isinstance(detail, dict) else ""
+                if not url:
+                    continue
+                blob = await self._download_media(url)
+                if not blob:
+                    continue
+                await self._stash_song_media(
+                    pool,
+                    blob,
+                    suffix=ext,
+                    source="file",
+                    session_id=session_id,
+                    user_id=user_id,
+                    sender=str((message.get("sender") or {}).get("nickname") or ""),
+                    message_id=str(message.get("message_id") or ""),
+                )
+                return await asyncio.to_thread(
+                    pool.claim, session_id=session_id, user_id=user_id, window_seconds=window
+                )
+        return None
 
     async def _sing_list(self, stream_id: str, songs: List[Any]) -> None:
         lines = _songs.render_library(songs)
@@ -1758,7 +1834,16 @@ class MiMoVoicePlugin(MaiBotPlugin):
             len(matches),
         )
 
-    async def _sing_add(self, stream_id: str, songs: List[Any], name: str, *, force: bool, user_id: str) -> None:
+    async def _sing_add(
+        self,
+        stream_id: str,
+        songs: List[Any],
+        name: str,
+        *,
+        force: bool,
+        user_id: str,
+        group_id: str = "",
+    ) -> None:
         config = self.config.songs
         clean = (name or "").strip()
         if not clean:
@@ -1774,6 +1859,11 @@ class MiMoVoicePlugin(MaiBotPlugin):
             user_id=user_id,
             window_seconds=float(config.add_window_seconds),
         )
+        if item is None:
+            # 兜底：钩子没收到（适配器当时没给链接、插件刚重启等）时，直接回查历史里的文件消息。
+            item = await self._stash_latest_file_from_history(
+                group_id=group_id, user_id=user_id, session_id=stream_id
+            )
         if item is None:
             await self._command_reply(
                 stream_id,
