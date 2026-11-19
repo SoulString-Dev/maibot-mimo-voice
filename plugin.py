@@ -1430,11 +1430,18 @@ class MiMoVoicePlugin(MaiBotPlugin):
         user_id = str(cue.get("user_id") or "")
         if not self._filter_allows(scope, group_id, user_id):
             return None
-        is_group = scope == "group"
-        if is_group and self.config.songs.require_mention and not (cue.get("is_at") or cue.get("is_mentioned")):
-            return None
         hit = _song_intent.match_intent(str(cue.get("text") or ""), self._intent_patterns())
         if hit is None:
+            return None
+        is_group = scope == "group"
+        if is_group and self.config.songs.require_mention and not (cue.get("is_at") or cue.get("is_mentioned")):
+            # 命中了但没被 @ / 点名：记一条，方便排查「为什么这条没放歌」
+            self.ctx.logger.info(
+                "点歌线索命中但未 @ / 未点名，已拦下（会话 %s，关键词=%r，文本=%r）",
+                session_id,
+                hit.keyword,
+                str(cue.get("text") or "")[:40],
+            )
             return None
         now = time.monotonic()
         if now - self._intent_last.get(session_id, 0.0) < _INTENT_MIN_INTERVAL_SECONDS:
