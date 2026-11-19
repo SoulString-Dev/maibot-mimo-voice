@@ -238,10 +238,10 @@ with temp_dir() as root:
     }
     calls = []
 
-    async def fake_call(api_name: str, args):
-        calls.append((api_name, args))
+    async def fake_call(api_name: str, params):
+        calls.append((api_name, params))
         if api_name.endswith("get_friend_msg_history"):
-            return history
+            return {"messages": history["messages"]}
         if api_name.endswith("get_private_file_url"):
             return {"url": "http://1.2.3.4:80/qqdownloadftnv5?rkey=abc"}
         return None
@@ -258,8 +258,8 @@ with temp_dir() as root:
     calls.clear()
     group_history = {"messages": [{"message": [{"type": "file", "data": {"file": "雨爱.mp3", "file_size": "5594426", "file_id": "FID-2"}}]}]}
 
-    async def fake_group_call(api_name: str, args):
-        calls.append((api_name, args))
+    async def fake_group_call(api_name: str, params):
+        calls.append((api_name, params))
         if api_name.endswith("get_group_msg_history"):
             return group_history
         if api_name.endswith("get_group_file_url"):

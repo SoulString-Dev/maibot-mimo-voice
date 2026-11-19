@@ -1438,13 +1438,17 @@ class MiMoVoicePlugin(MaiBotPlugin):
                 found.append((data, _song_media.guess_extension(url) or ".mp3", "file"))
         return found
 
-    async def _call_adapter_api(self, api_name: str, args: Dict[str, Any]) -> Any:
-        """通过宿主 ``api.call`` 调适配器的公开 API；不可用或失败时返回 ``None``。"""
+    async def _call_adapter_api(self, api_name: str, params: Dict[str, Any]) -> Any:
+        """通过宿主 ``api.call`` 调适配器的公开 API，返回响应里的 ``data`` 字段。
+
+        适配器的公开 API 统一长这样：``async def api_x(self, params: dict | None = None)``，
+        返回 NapCat 的原始响应 ``{"status": "ok", "retcode": 0, "data": {...}}``。
+        """
         call = getattr(self.ctx, "call_capability", None)
         if call is None:
             return None
         try:
-            result = await call("api.call", api_name=api_name, args=args)
+            result = await call("api.call", api_name=api_name, args={"params": params})
         except Exception as exc:  # 适配器没这个 API / 宿主不支持，都不该影响聊天
             self._warn_once(f"songs:api:{api_name}", "调用适配器 API %s 失败：%s", api_name, exc)
             return None
@@ -1452,7 +1456,10 @@ class MiMoVoicePlugin(MaiBotPlugin):
             error = str(result.get("error") or "无返回") if isinstance(result, dict) else "无返回"
             self._warn_once(f"songs:api:{api_name}", "适配器 API %s 不可用：%s", api_name, error)
             return None
-        return result.get("result")
+        payload = result.get("result")
+        if isinstance(payload, dict) and isinstance(payload.get("data"), (dict, list)):
+            return payload["data"]
+        return payload
 
     async def _resolve_file_url(self, text: str, *, group_id: str, user_id: str) -> str:
         """文件消息只有文件名时，回查最近历史拿 ``file_id``，再向适配器要下载地址。
