@@ -1373,7 +1373,7 @@ class MiMoVoicePlugin(MaiBotPlugin):
                 ",".join(kinds) or "-",
             )
         try:
-            candidates = await self._inbound_audio(payload)
+            candidates = await self._inbound_audio(payload, group_id=group_id, user_id=user_id)
         except Exception as exc:  # 收集失败不能影响聊天链路
             self.ctx.logger.warning("入站音频收集失败：%s", exc)
             return
@@ -1397,7 +1397,9 @@ class MiMoVoicePlugin(MaiBotPlugin):
             except OSError as exc:
                 self.ctx.logger.warning("暂存音频失败（%s）", exc)
 
-    async def _inbound_audio(self, payload: Dict[str, Any]) -> List[Tuple[bytes, str, str]]:
+    async def _inbound_audio(
+        self, payload: Dict[str, Any], *, group_id: str = "", user_id: str = ""
+    ) -> List[Tuple[bytes, str, str]]:
         """从消息段里挑出音频：语音条直接有 wav 字节，文件消息只有下载链接。"""
         segments = payload.get("raw_message")
         if not isinstance(segments, list):
@@ -1425,13 +1427,95 @@ class MiMoVoicePlugin(MaiBotPlugin):
                 continue
             if kind != "text":
                 continue
-            url = _song_media.extract_file_url(str(segment.get("data") or ""))
+            text = str(segment.get("data") or "")
+            url = _song_media.extract_file_url(text)
+            if not url:
+                url = await self._resolve_file_url(text, group_id=group_id, user_id=user_id)
             if not url:
                 continue
             data = await self._download_media(url)
             if data:
                 found.append((data, _song_media.guess_extension(url) or ".mp3", "file"))
         return found
+
+    async def _call_adapter_api(self, api_name: str, args: Dict[str, Any]) -> Any:
+        """通过宿主 ``api.call`` 调适配器的公开 API；不可用或失败时返回 ``None``。"""
+        call = getattr(self.ctx, "call_capability", None)
+        if call is None:
+            return None
+        try:
+            result = await call("api.call", api_name=api_name, args=args)
+        except Exception as exc:  # 适配器没这个 API / 宿主不支持，都不该影响聊天
+            self._warn_once(f"songs:api:{api_name}", "调用适配器 API %s 失败：%s", api_name, exc)
+            return None
+        if not isinstance(result, dict) or not result.get("success"):
+            error = str(result.get("error") or "无返回") if isinstance(result, dict) else "无返回"
+            self._warn_once(f"songs:api:{api_name}", "适配器 API %s 不可用：%s", api_name, error)
+            return None
+        return result.get("result")
+
+    async def _resolve_file_url(self, text: str, *, group_id: str, user_id: str) -> str:
+        """文件消息只有文件名时，回查最近历史拿 ``file_id``，再向适配器要下载地址。
+
+        适配器把 ``file`` 段压成 ``[文件] 名字，大小: N``，私聊连 url 都没有；但它公开了
+        ``message.get_*_msg_history`` 与 ``file.get_*_file_url``，插件层就能自己补齐，
+        不需要改适配器。
+        """
+        if not self.config.songs.lookup_file_url:
+            return ""
+        name, size = _song_media.parse_file_message(text)
+        if not name or not _song_media.guess_extension(name):
+            return ""
+        if group_id:
+            history = await self._call_adapter_api(
+                "adapter.napcat.message.get_group_msg_history", {"group_id": group_id, "count": 5}
+            )
+        else:
+            history = await self._call_adapter_api(
+                "adapter.napcat.message.get_friend_msg_history", {"user_id": user_id, "count": 5}
+            )
+        file_id = self._pick_file_id(history, name=name, size=size)
+        if not file_id:
+            self.ctx.logger.info("文件消息没找回 file_id：%s（大小 %s）", name, size or "?")
+            return ""
+        if group_id:
+            detail = await self._call_adapter_api(
+                "adapter.napcat.file.get_group_file_url", {"group_id": group_id, "file_id": file_id}
+            )
+        else:
+            detail = await self._call_adapter_api(
+                "adapter.napcat.file.get_private_file_url", {"file_id": file_id}
+            )
+        if isinstance(detail, dict):
+            return str(detail.get("url") or "").strip()
+        return ""
+
+    @staticmethod
+    def _pick_file_id(history: Any, *, name: str, size: int) -> str:
+        """从历史消息里找出同名（同大小优先）的 file 段，返回它的 ``file_id``。"""
+        messages = history.get("messages") if isinstance(history, dict) else history
+        if not isinstance(messages, list):
+            return ""
+        for message in reversed(messages):
+            segments = message.get("message") if isinstance(message, dict) else None
+            if not isinstance(segments, list):
+                continue
+            for segment in segments:
+                if not isinstance(segment, dict) or str(segment.get("type") or "") != "file":
+                    continue
+                data = segment.get("data")
+                if not isinstance(data, dict):
+                    continue
+                file_name = str(data.get("file") or data.get("name") or "").strip()
+                file_size = str(data.get("file_size") or "").strip()
+                if name and file_name and file_name != name:
+                    continue
+                if size and file_size and file_size != str(size):
+                    continue
+                file_id = str(data.get("file_id") or "").strip()
+                if file_id:
+                    return file_id
+        return ""
 
     @staticmethod
     def _decode_segment_audio(segment: Dict[str, Any]) -> bytes:
@@ -1444,11 +1528,16 @@ class MiMoVoicePlugin(MaiBotPlugin):
             return b""
 
     async def _download_media(self, url: str) -> bytes:
-        """从 QQ 文件链接下载音频；只认 https + 公网主机，大小按配置截断。"""
+        """从 QQ 文件链接下载音频；只认 http(s) + 公网主机，大小按配置截断。
+
+        QQ 文件的 CDN 地址目前只有 ``http://<公网 IP>:80/qqdownloadftnv5?...``（2026-11-19 实测），
+        所以不能强制 https；作为补偿，主机必须是公网地址（内网 / 本机 / 元数据地址一律拒绝）。
+        """
         config = self.config.songs
         limit = max(1, int(float(config.max_file_mb) * 1024 * 1024))
-        if not url.lower().startswith("https://"):
-            self._warn_once("songs:scheme", "只下载 https 链接（收到 %s），已跳过：", url[:48])
+        scheme = urlsplit(url).scheme.lower()
+        if scheme not in ("http", "https"):
+            self._warn_once("songs:scheme", "只下载 http(s) 链接（收到 %s），已跳过：", url[:48])
             return b""
         host = urlsplit(url).hostname or ""
         if not host or _config._is_private_host(host):

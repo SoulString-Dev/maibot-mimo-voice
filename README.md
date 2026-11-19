@@ -245,6 +245,8 @@ text = "早上好，今天也要加油呀"
 
 （音频在群里发的也行：私聊里 `add` 会按「同一个人、120 秒内」跨会话找那条文件；别人的音频不会被认领。）
 
+> **文件消息没有链接怎么办**：QQ 的私聊文件段只带 `file_id`、没有下载地址。插件会自己补——用 `api.call` 调适配器公开的 `message.get_friend/group_msg_history` 找回同名的 file 段，再调 `file.get_private/group_file_url` 换出下载地址（`songs.lookup_file_url`，默认开）。不需要改适配器；适配器不是 snowluma 版或没有这些 API 时，退回「只支持语音条」。
+
 ```
 /voice sing addforce 雨爱
 ```

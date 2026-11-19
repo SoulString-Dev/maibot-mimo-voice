@@ -69,6 +69,28 @@ def extract_file_url(text: str) -> Optional[str]:
     return None
 
 
+def parse_file_message(text: str) -> Tuple[str, int]:
+    """从 ``[文件] 名字，大小: 1234`` 里取出文件名与字节数；不是文件消息返回 ``("", 0)``。
+
+    适配器对私聊文件**不给链接**（只有 ``file_id``），所以要靠「文件名 + 大小」去历史消息里
+    找回那条 file 段，再问适配器要下载地址。
+    """
+    body = str(text or "").strip()
+    marker = "[文件]"
+    if not body.startswith(marker):
+        return "", 0
+    body = body[len(marker) :].strip()
+    size = 0
+    size_match = re.search(r"[，,]\s*大小:\s*(?P<size>\d+)", body)
+    if size_match is not None:
+        size = int(size_match.group("size"))
+        body = body[: size_match.start()]
+    link_match = re.search(r"[，,]\s*链接:", body)
+    if link_match is not None:
+        body = body[: link_match.start()]
+    return body.strip(), size
+
+
 def probe_duration(data: bytes, suffix: str = "") -> float:
     """返回时长（秒）；无法识别时返回 ``0.0``，不抛异常。"""
     blob = bytes(data or b"")

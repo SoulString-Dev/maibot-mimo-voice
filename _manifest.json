@@ -36,7 +36,8 @@
     "send.hybrid",
     "chat.get_stream_by_group_id",
     "chat.get_stream_by_user_id",
-    "chat.open_session"
+    "chat.open_session",
+    "api.call"
   ],
   "i18n": {
     "default_locale": "zh-CN",

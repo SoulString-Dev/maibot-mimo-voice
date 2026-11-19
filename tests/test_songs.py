@@ -220,4 +220,78 @@ with temp_dir() as root:
     checker.equal("丢弃后清空", len(pool.items()), 0)
     checker.check("丢弃后文件删除", not only.path_in(Path(root)).exists())
 
+# ---------------------------------------------------------------- 文件消息补链接
+with temp_dir() as root:
+    plugin, config, _logger = make(Path(root))
+    history = {
+        "messages": [
+            {"message": [{"type": "text", "data": "随便聊聊"}]},
+            {
+                "message": [
+                    {
+                        "type": "file",
+                        "data": {"file": "雨爱.mp3", "file_size": "5594426", "file_id": "FID-1"},
+                    }
+                ]
+            },
+        ]
+    }
+    calls = []
+
+    async def fake_call(api_name: str, args):
+        calls.append((api_name, args))
+        if api_name.endswith("get_friend_msg_history"):
+            return history
+        if api_name.endswith("get_private_file_url"):
+            return {"url": "http://1.2.3.4:80/qqdownloadftnv5?rkey=abc"}
+        return None
+
+    plugin._call_adapter_api = fake_call
+    url = asyncio.run(
+        plugin._resolve_file_url("[文件] 雨爱.mp3，大小: 5594426", group_id="", user_id="456")
+    )
+    checker.equal("补链接成功", url, "http://1.2.3.4:80/qqdownloadftnv5?rkey=abc")
+    checker.equal("先查历史再换链", [name.split(".")[-1] for name, _args in calls], ["get_friend_msg_history", "get_private_file_url"])
+    checker.equal("历史查询带 user_id", str(calls[0][1].get("user_id")), "456")
+
+    # 群聊走群历史 + 群文件链接
+    calls.clear()
+    group_history = {"messages": [{"message": [{"type": "file", "data": {"file": "雨爱.mp3", "file_size": "5594426", "file_id": "FID-2"}}]}]}
+
+    async def fake_group_call(api_name: str, args):
+        calls.append((api_name, args))
+        if api_name.endswith("get_group_msg_history"):
+            return group_history
+        if api_name.endswith("get_group_file_url"):
+            return {"url": "http://5.6.7.8:80/file?rkey=xyz"}
+        return None
+
+    plugin._call_adapter_api = fake_group_call
+    url = asyncio.run(
+        plugin._resolve_file_url("[文件] 雨爱.mp3，大小: 5594426", group_id="123", user_id="456")
+    )
+    checker.equal("群文件补链接", url, "http://5.6.7.8:80/file?rkey=xyz")
+    checker.check("群历史带群号", str(calls[0][1].get("group_id")) == "123", str(calls[0][1]))
+    checker.check("群文件地址带群号", str(calls[1][1].get("group_id")) == "123", str(calls[1][1]))
+
+    # 名字/大小对不上就不认领
+    checker.equal("名字不符不回退", plugin._pick_file_id(history, name="别的.mp3", size=0), "")
+    checker.equal("大小不符不认领", plugin._pick_file_id(history, name="雨爱.mp3", size=1), "")
+
+    # 开关关掉时不再问适配器
+    calls.clear()
+    config.songs.lookup_file_url = False
+    url = asyncio.run(
+        plugin._resolve_file_url("[文件] 雨爱.mp3，大小: 5594426", group_id="", user_id="456")
+    )
+    checker.equal("关掉补链接开关", url, "")
+    checker.equal("关掉后不调 API", calls, [])
+
+    # 非音频文件名不去查历史
+    calls.clear()
+    config.songs.lookup_file_url = True
+    url = asyncio.run(plugin._resolve_file_url("[文件] 文档.pdf，大小: 100", group_id="", user_id="456"))
+    checker.equal("非音频不查历史", url, "")
+    checker.equal("非音频零调用", len(calls), 0)
+
 sys.exit(checker.report())

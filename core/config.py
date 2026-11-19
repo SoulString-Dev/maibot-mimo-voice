@@ -480,6 +480,13 @@ class SongsConfig(PluginConfigBase):
     )
     pending_max_entries: int = Field(default=20, ge=1, le=200, description="暂存池最多保留几条")
     download_timeout_seconds: float = Field(default=20.0, ge=3.0, le=120.0, description="下载 QQ 文件链接的超时（秒）")
+    lookup_file_url: bool = Field(
+        default=True,
+        description=(
+            "文件消息没带链接时，通过适配器公开 API 补地址：get_*_msg_history 找回 file_id，"
+            "再调 file.get_*_file_url 换下载链接。关掉后只认语音条（和自带链接的文件）"
+        ),
+    )
     trigger_words: str = Field(default="", description="意图层触发词，逗号分隔；空=只走命令，不注入候选")
     intent_candidates: int = Field(default=5, ge=1, le=10, description="意图层最多给模型几条候选")
     sing_group_cooldown_seconds: float = Field(default=30.0, ge=0.0, le=600.0, description="同一会话点歌的冷却（秒）")

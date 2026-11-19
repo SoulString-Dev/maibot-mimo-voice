@@ -251,6 +251,9 @@ pending_max_mb = 300.0
 pending_max_entries = 20
 # 下载 QQ 文件链接的超时（秒）。
 download_timeout_seconds = 20.0
+# 文件消息没带链接时，通过适配器公开 API 补地址（历史消息找 file_id → file.get_*_file_url）；
+# 关掉后只认语音条和自带链接的文件。
+lookup_file_url = true
 # 意图层触发词（空格分隔，留空 = 只认命令），命中后把候选歌名给模型挑。
 trigger_words = ""
 # 意图层给模型看的候选数（1–10）。
