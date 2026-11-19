@@ -100,7 +100,6 @@ from .core.constants import (
     _SELF_SENT_MAX_ENTRIES,
     _SELF_SENT_TEXT_TTL_SECONDS,
     _SILENCE_DBFS,
-    _SING_LIST_NODE_LINES,
     _SOFT_LIMIT_CEILING,
     _SONG_CUE_TTL_SECONDS,
     _SONG_HOUSEKEEPING_SECONDS,
@@ -2138,7 +2137,11 @@ class MiMoVoicePlugin(MaiBotPlugin):
 
     async def _sing_list(self, stream_id: str, songs: List[Any]) -> None:
         header = f"曲库共 {len(songs)} 首（上限 {int(self.config.songs.max_songs)}）"
-        lines = _songs.render_library(songs)
+        # 一首歌一条：别名/标签再长也塞得下，节点本身就是分隔符
+        lines = [
+            f"{index}. {song.label()}"
+            for index, song in enumerate(songs, start=1)
+        ] or _songs.render_library(songs)
         if songs and await self._send_forward_list(stream_id, header, lines):
             return
         # 回退：单条文本清单（适配器不支持合并转发时走这里）
@@ -2149,11 +2152,9 @@ class MiMoVoicePlugin(MaiBotPlugin):
         await self._command_reply(stream_id, "\n".join([header + "：", *body]))
 
     async def _send_forward_list(self, stream_id: str, header: str, lines: List[str]) -> bool:
-        """把清单发成合并转发（一张卡片）；每 15 首一个节点，避免单节点过长。"""
+        """把清单发成合并转发（一张卡片），每个节点一条：第一节点是表头，之后一首一条。"""
         nodes: List[Dict[str, Any]] = [_forward_node(header)]
-        for index in range(0, len(lines), _SING_LIST_NODE_LINES):
-            chunk = lines[index : index + _SING_LIST_NODE_LINES]
-            nodes.append(_forward_node("\n".join(chunk)))
+        nodes.extend(_forward_node(line) for line in lines)
         try:
             await self.ctx.send.hybrid(
                 segments=[{"type": "forward", "data": nodes}],

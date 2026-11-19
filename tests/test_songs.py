@@ -123,6 +123,8 @@ with temp_dir() as root:
     nodes = forward[0]["data"]
     joined = "\n".join(node["content"][0]["data"] for node in nodes)
     checker.check("转发里有歌名与总数", "雨爱" in joined and "1 首" in joined, joined)
+    checker.equal("一首歌一个节点（另加表头）", len(nodes), 2)
+    checker.check("节点带序号", nodes[1]["content"][0]["data"].startswith("1. "), nodes[1]["content"][0]["data"])
     checker.equal("清单不额外发文字", len(plugin.ctx.send.texts), texts_before_list)
 
     reply = command(plugin, "/voice sing 雨爱")
