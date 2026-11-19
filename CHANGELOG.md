@@ -28,7 +28,7 @@ README 只保留最新一版的要点。
 
 ### 修改
 
-- `plugin.config_version` 升到 0.7.0；`config.example.toml` 新增 `[songs]` 段 18 项。
+- `plugin.config_version` 升到 0.7.0；`config.example.toml` 新增 `[songs]` 段 20 项（总配置 55 → 75 项）。
 - `/voice` 命令的「仅私聊」规则放开一个例外：`/voice sing` 在群聊里也能用；其余子命令仍是仅私聊、仅管理员。
 - 新增纯标准库音频探测（`core/song_media.py`）：mp3 逐帧算时长、flac 读 STREAMINFO、wav 用 `wave`，**不依赖 ffmpeg**。
 - 时长探测失败的文件仍然可以入库和播放（发送不依赖时长），清单里显示「时长未知」而不是 `0:00`。

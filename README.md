@@ -233,7 +233,7 @@ text = "早上好，今天也要加油呀"
 
 ## 唱歌点播（0.7.0）
 
-把本地曲库里的歌当语音条发出来。一首歌最多 5 分钟（`max_duration_seconds`，5–1800 秒）、曲库最多 50 首，mp3 / wav / flac 都可以，**不需要 ffmpeg**。
+把本地曲库里的歌当语音条发出来。一首歌最多 5 分钟（`max_duration_seconds`，5–1800 秒）、曲库最多 50 首、总容量默认 500 MB（`max_total_mb`），mp3 / wav / flac 都可以，**不需要 ffmpeg**。
 
 **入库**（管理员，**只能私聊**）：先发音频——语音条、mp3/wav/flac 文件，或 QQ 文件消息——然后在 120 秒内发
 
@@ -241,9 +241,9 @@ text = "早上好，今天也要加油呀"
 /voice sing add 雨爱
 ```
 
-插件会把音频写进数据目录的 `songs/` 下。同名（含别名）会被拒绝，要覆盖就加 `force`：
+插件会把音频写进数据目录的 `songs/` 下。同名（含别名）会被拒绝，要覆盖就改用 `addforce`：
 
-（音频在群里发的也行：私聊里 `add` 会按「同一个人、120 秒内」跨会话找那条文件；别人的音频不会被认领。）
+（音频必须发在**同一个会话**里：先发到群里、再去私聊 `add` 认领会失败，提示「没收到音频」——这条是写死的，不提供跨会话认领。）
 
 > **文件消息没有链接怎么办**：QQ 的私聊文件段只带 `file_id`、没有下载地址。插件会自己补——用 `api.call` 调适配器公开的 `message.get_friend/group_msg_history` 找回同名的 file 段，再调 `file.get_private/group_file_url` 换出下载地址（`songs.lookup_file_url`，默认开）。不需要改适配器；适配器不是 snowluma 版或没有这些 API 时，退回「只支持语音条」。
 
@@ -254,7 +254,7 @@ text = "早上好，今天也要加油呀"
 **点播**（所有人）：
 
 ```
-/voice sing list          曲库清单（单条文本，最多 60 行）
+/voice sing list          曲库清单（合并转发卡片，表头 + 每首歌一条、带序号）
 /voice sing 雨爱          按歌名点歌，多个命中随机挑一首
 /voice sing 下雨          ｜别名｜标签同样能命中
 ```
@@ -275,7 +275,7 @@ text = "早上好，今天也要加油呀"
 - `del` 只认歌名，避免拿别名误删；要删别名请先 `set ... alias` 改成只剩歌名。
 - 冷却：同一会话 30 秒、同一人 10 秒（`sing_group_cooldown_seconds` / `sing_user_cooldown_seconds`）。
 - 会话被 `/voice off` 关掉后点歌直接拒绝；曲库不分群，跟随 `filters` 的群聊 / 私聊放行名单。
-- 收到的音频先落在 `pending/`（`pending/index.json` 兼作跨插件取音频的入口），1 小时过期或总量超 300 MB 按最旧清理；临时池不拦截消息，其他插件仍能拿到原文。
+- 收到的音频先落在 `pending/`（`pending/index.json` 兼作跨插件取音频的入口），1 小时过期或总量超 300 MB 按最旧清理，后台每 10 分钟扫一次；`songs/.trash/` 里删除的音频保留 7 天后自动清掉。临时池不拦截消息，其他插件仍能拿到原文。
 
 > **版权**：只放你自己有权使用的音频。请确保你保障了原作者的音乐著作权及许可协议——本插件不提供任何下载或转存能力。
 
@@ -420,7 +420,7 @@ private_mode = "all"
 │   ├── song_library.py          # 曲库：songs.json 读写 / 匹配 / 别名与标签
 │   ├── song_media.py            # 音频探测（mp3 / wav / flac 时长）与 wav 降采样
 │   └── pending.py               # 临时池：入站音频旁路落盘、认领与过期清理
-├── tests/                       # 491 条断言，不依赖 pytest
+├── tests/                       # 591 条断言，不依赖 pytest
 ├── config.example.toml
 ├── _manifest.json
 ├── assets/icon.svg              # 商店图标
@@ -532,7 +532,7 @@ python -c "import tomllib; tomllib.load(open('config.example.toml','rb'))"
 pip install -r requirements-dev.txt
 ruff check .
 mypy plugin.py core   # 需先装 maibot-plugin-sdk，否则基类被当作 Any，会漏掉 self.config 的类型问题
-python tests/run_all.py     # 十四组共 491 条断言（文本/音频/配置/超时/触发/命令/触发词/定时/并存/API/点播/曲库/探测）
+python tests/run_all.py     # 十五组共 591 条断言（文本/音频/配置/超时/触发/命令/触发词/定时/并存/API/点播/曲库/探测/意图层）
 ```
 
 Windows 上等价的一条命令：`pwsh -File tools/run_checks.ps1`（已处理控制台编码与临时目录的差异）。

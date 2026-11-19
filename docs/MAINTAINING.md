@@ -2,6 +2,8 @@
 
 > 写给以后还想继续把它做得更好的自己。商店最新可装 **0.6.0**（11-18 13:16 发版，tag/Release `6606dce`，Release id `449554364`；11-19 00:39 自动收录，审核单 [#1724](https://github.com/Mai-with-u/plugin-repo/issues/1724)，`decision=pass`、`risks=[]`）；上一版 0.5.6 = `accced2`（11-11 07:13 收录 [#1584](https://github.com/Mai-with-u/plugin-repo/issues/1584)）、0.5.5 = `f519fa0`（11-10 01:33 收录 #1544）、0.5.4 = `0ab88e2`（11-08 05:46 收录 #1496）。
 >
+> **0.7.0 状态（2026-11-20 02:5x）**：唱歌点播 + 意图层 + P0/P1/P2 加固已写完并在 NAS 私聊/群聊真机验证，15 个文件 **591** 条断言全绿；NAS 插件目录已铺开发版（`plugin.py` sha256 与本地一致），线上 `[songs] enabled=true`、曲库 2 首，`config.toml` 已按 0.7.0 新键重写（旧 `trigger_words` 删除，补 `max_total_mb` / `lookup_file_url` / `intent_patterns` / `intent_names` / `require_mention`）。**用户决定先观察一两天再打 tag 发 0.7.0**。
+>
 > 0.6.0 内容：语音 + 文字并存（`delivery.keep_text`，默认关）、内建定时语音（`[scheduled]`，默认关）、对外 API `voice_say`（`api.token` 共享口令 + 全局限流）、单测接入 CI；设计见 `docs/superpowers/specs/2026-11-11-voice-0.6.0-design.md`，计划见 `docs/superpowers/plans/2026-11-11-voice-0.6.0.md`；11 个文件 369 条断言全绿。11-16/11-17 两处线上修正：并存改成文字、语音各一条（混合数组部分适配器只落地语音段）；插件自己发出的文字按 `(会话, 文本)` 记 10 秒标记、不再被转成语音（此前 `keep_text` 会连出 2–3 条语音、`/voice say` 回执也会被读出来），`/voice test|say` 开 `keep_text` 时也带文字。
 >
 > 已确认的上游限制：MiMo 每个账号的 TTS 并发名额只有 1，客户端超时后服务端仍在生成（探针最长 72.7 秒），超时后重发必 429（0.3–0.5 秒内被拒）。所以「重发」「自适应等更久」都不再有意义，见 cross-repo `docs/analysis-dual-draft.md` 与 README 的「429 与超时」。
@@ -18,7 +20,7 @@
 | 上游 | fork 自 `Ling-LA/ling-tts-bot`（MIT，保留版权声明） |
 | 部署形态 | 放进麦麦插件目录；自定义参考音频放插件**数据目录**的 `references/` |
 
-运行形态：hook `send_service.before_send` 把出站纯文本改写成 `voice` 段。**不需要**适配器私有 API；manifest 只声明真正用到的 5 项能力（`send.text`、`send.hybrid`、`chat.get_stream_by_group_id`、`chat.get_stream_by_user_id`、`chat.open_session`），多声明一项就多一份审核风险。
+运行形态：hook `send_service.before_send` 把出站纯文本改写成 `voice` 段。**不需要**适配器私有 API；manifest 只声明真正用到的 6 项能力（`send.text`、`send.hybrid`、`chat.get_stream_by_group_id`、`chat.get_stream_by_user_id`、`chat.open_session`、`api.call`；最后一项只用于给 QQ 文件消息补一次下载地址，用途见下文审核口径），多声明一项就多一份审核风险。
 
 ## 2. 发版流程
 
@@ -49,9 +51,15 @@ git tag -a vX.Y.Z -m "vX.Y.Z" && git push origin vX.Y.Z   # 版本号必须与 _
 3. `api_key` 只进请求头、不进日志；错误响应体截断。
 4. 不读数据库、不改宿主配置，全走 SDK 面。
 5. `subprocess` 只允许固定参数、不经 shell、聊天内容不进命令行（默认路径最好完全不调用）。
-6. manifest 与实现一致：`capabilities` 要真、`plugin_type` 合法、依赖要声明。
+6. manifest 与实现一致：`capabilities` 要真（0.7.0 起 6 项，`api.call` 的用途要能解释清楚）、`plugin_type` 合法、依赖要声明。
 7. 只用宿主注册过的 hook 点；SDK 符号按 PyPI 源码逐条比对。
 8. 无 `eval/exec/pickle/shell=True`。
+
+### 0.7.0 新增能力的审核口径（审查前对照）
+
+- **`api.call` 为什么需要**：适配器把 QQ 文件消息转成文本时只给 `[文件] 名字，大小: N`，没有下载地址；插件声明 `api.call`，只在用户主动 `/voice sing add` 且本会话刚发过音频时，调 `message.get_*_msg_history` 找 `file_id`、再调 `file.get_*_file_url` 换一次地址。参数固定、不遍历历史、不读聊天以外的信息；`songs.enabled=false`（默认）时一次都不调用。README 有同文说明可直接贴审核。
+- **删除类调用**：只删插件自己写的数据——`pending/` 里的过期音频、`songs/.trash/` 里超过 7 天的文件、`del` 明确要求删掉的曲库文件；路径全部拼在 `ctx.paths.data_dir` 下，条目来自 `songs.json` 时还会拒绝带 `/`、`\`、`..` 的名字。
+- **下载**：只在入库链路里下载 QQ 文件（语音条走 base64，不需要网络）；只接受 http(s)、公网地址，解析结果与每一跳跳转都重新校验，文本来源的链接只认 QQ 域名；大小受 `songs.max_file_mb`（默认 20 MB）限制。不下载执行、不传用户/群 ID 到第三方。
 
 ### 历史被挑出的问题（当 checklist）
 
