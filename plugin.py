@@ -2092,8 +2092,8 @@ class MiMoVoicePlugin(MaiBotPlugin):
 
         权限不交给宿主的 ``operator``：那套白名单在宿主配置里，插件拿不到多管理员列表。
         这里自己判 ``commands.admins``（可写 ``10000002`` 或 ``qq:10000002``），失败也给回执。
-        除 ``sing``（唱歌点播，群里也能用）外，命令只在私聊生效——群里的 ``/voice`` 按普通消息处理，
-        避免在群里刷屏。
+        除 ``/voice sing list`` 与 ``/voice sing <歌名>``（点歌）外，命令只在私聊生效——群里的
+        ``/voice`` 按普通消息处理，避免在群里刷屏；入库 / 删除 / 改名因此也只能私聊。
         """
         parsed = _commands.parse_command(str(kwargs.get("text") or ""))
         if parsed is None or not self.config.commands.enabled:
@@ -2106,10 +2106,12 @@ class MiMoVoicePlugin(MaiBotPlugin):
 
         sub, rest = parsed
         if sub == "sing":
-            # 唱歌点播是唯一允许在群里用的子命令：list / 点歌谁都能发，
-            # 入库与增删改在 _handle_sing_command 里再判管理员。
-            await self._handle_sing_command(stream_id, group_id, user_id, platform, rest)
-            return True, None, 1
+            # 群里只放行 list 和点歌；入库 / 删除 / 改名跟 test、say 一样只限私聊，
+            # 不合规时直接落到下面那条「只在私聊里可用」的回执，文案与它们完全一致。
+            action = _songs.parse_sing(rest)[0]
+            if action in ("list", "sing") or not group_id:
+                await self._handle_sing_command(stream_id, group_id, user_id, platform, rest)
+                return True, None, 1
 
         if group_id:
             if stream_id:

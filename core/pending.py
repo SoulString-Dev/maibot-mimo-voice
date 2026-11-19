@@ -181,22 +181,32 @@ class PendingPool:
         window_seconds: float,
         now: Optional[float] = None,
     ) -> Optional[PendingItem]:
-        """在窗口内找本会话最近的一条；同发送者的优先，其次才跨人认领。"""
+        """在窗口内找本会话最近的一条；同发送者的优先，其次才跨人认领。
+
+        ``add`` 现在只允许私聊，但音频可能是刚在群里发的，所以本会话没有候选时，
+        再按「同一个人」跨会话找一次——陌生人的文件永远不会被认领。
+        """
         stamp = time.time() if now is None else float(now)
         window = max(0.0, float(window_seconds))
-        candidates = [
-            item
-            for item in self._load()
-            if item.session_id == str(session_id or "")
-            and item.created_at <= stamp
-            and stamp - item.created_at <= window
-            and item.path_in(self.root).exists()
-        ]
+        wanted_session = str(session_id or "")
+        wanted_user = str(user_id or "")
+
+        def usable(item: PendingItem) -> bool:
+            return (
+                item.created_at <= stamp
+                and stamp - item.created_at <= window
+                and item.path_in(self.root).exists()
+            )
+
+        items = [item for item in self._load() if usable(item)]
+        candidates = [item for item in items if item.session_id == wanted_session]
+        if not candidates and wanted_user:
+            candidates = [item for item in items if item.user_id == wanted_user]
         if not candidates:
             return None
         candidates.sort(key=lambda item: item.created_at, reverse=True)
         for item in candidates:
-            if user_id and item.user_id == str(user_id):
+            if wanted_user and item.user_id == wanted_user:
                 return item
         return candidates[0]
 

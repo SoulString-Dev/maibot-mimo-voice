@@ -67,6 +67,11 @@ def command(plugin, text: str, *, user_id: str = "456", group_id: str = "123", s
     return plugin.ctx.send.texts[-1][1] if plugin.ctx.send.texts else ""
 
 
+def private(plugin, text: str, *, user_id: str = "456", stream_id: str = "p1") -> str:
+    """私聊里的命令；入库 / 删除 / 改名只有私聊能用，音频可能是刚在群里发的。"""
+    return command(plugin, text, user_id=user_id, group_id="", stream_id=stream_id)
+
+
 # ---------------------------------------------------------------- 入站收集
 with temp_dir() as root:
     plugin, config, _logger = make(Path(root))
@@ -96,7 +101,7 @@ with temp_dir() as root:
     plugin, config, _logger = make(Path(root))
     collect(plugin, voice_payload(wav_bytes(1.5)))
 
-    reply = command(plugin, "/voice sing add 雨爱")
+    reply = private(plugin, "/voice sing add 雨爱")
     checker.check("入库回执", "已入库" in reply, reply)
     songs_path = Path(root) / "songs" / "songs.json"
     checker.check("曲库文件已写", songs_path.exists())
@@ -126,7 +131,7 @@ with temp_dir() as root:
     checker.check("找不到提示", "没有找到" in reply, reply)
 
     # 别名与全量替换
-    reply = command(plugin, "/voice sing set 雨爱 alias 雨天,下雨")
+    reply = private(plugin, "/voice sing set 雨爱 alias 雨天,下雨")
     checker.check("改别名回执", "已更新" in reply, reply)
     plugin.__dict__["_sing_group_last"].clear()
     plugin.__dict__["_sing_user_last"].clear()
@@ -135,14 +140,14 @@ with temp_dir() as root:
 
     plugin.__dict__["_sing_group_last"].clear()
     plugin.__dict__["_sing_user_last"].clear()
-    reply = command(plugin, "/voice sing set 雨爱 tags 杨丞琳,伤感情歌")
+    reply = private(plugin, "/voice sing set 雨爱 tags 杨丞琳,伤感情歌")
     command(plugin, "/voice sing 杨丞琳")
     checker.equal("按标签点歌", len(plugin.ctx.send.hybrids), 3)
 
     # 删除只认歌名
-    reply = command(plugin, "/voice sing del 下雨")
+    reply = private(plugin, "/voice sing del 下雨")
     checker.check("别名不能删", "别名" in reply, reply)
-    reply = command(plugin, "/voice sing del 雨爱")
+    reply = private(plugin, "/voice sing del 雨爱")
     checker.check("按歌名删除", "已删除" in reply, reply)
     songs, _warnings = lib.load_library(songs_path)
     checker.equal("删除后空库", len(songs), 0)
@@ -150,13 +155,18 @@ with temp_dir() as root:
 # ---------------------------------------------------------------- 权限与开关
 with temp_dir() as root:
     plugin, config, _logger = make(Path(root))
-    reply = command(plugin, "/voice sing add 雨爱", user_id="999")
+    reply = private(plugin, "/voice sing add 雨爱", user_id="999")
     checker.check("非管理员不能入库", "管理员" in reply, reply)
     reply = command(plugin, "/voice sing list", user_id="999")
     checker.check("非管理员能看列表", "曲库" in reply, reply)
 
     reply = command(plugin, "/voice sing 雨爱", user_id="999")
     checker.check("非管理员点歌走找不到", "没有找到" in reply, reply)
+
+    # 入库与增删改只走私聊：群里发就跟 test / say 一样被「只在私聊」挡掉
+    for text in ("/voice sing add 雨爱", "/voice sing addforce 雨爱", "/voice sing del 雨爱", "/voice sing set 雨爱 alias 雨"):
+        reply = command(plugin, text)
+        checker.check(f"群里拒绝 {text.split()[-1] or text}", "只在私聊里可用" in reply, reply)
 
 with temp_dir() as root:
     plugin, config, _logger = make(Path(root), enabled=False)
@@ -173,7 +183,7 @@ with temp_dir() as root:
 with temp_dir() as root:
     plugin, config, _logger = make(Path(root))
     collect(plugin, voice_payload(wav_bytes(1.5)))
-    command(plugin, "/voice sing add 雨爱")
+    private(plugin, "/voice sing add 雨爱")
     plugin.__dict__["_session_switch"]["s1"] = False
     reply = command(plugin, "/voice sing 雨爱")
     checker.check("/voice off 挡点歌", "已关闭" in reply, reply)
@@ -186,7 +196,7 @@ with temp_dir() as root:
     for row in raw["items"]:
         row["created_at"] -= 3600
     stale.write_text(json.dumps(raw, ensure_ascii=False), encoding="utf-8")
-    reply = command(plugin, "/voice sing add 雨爱")
+    reply = private(plugin, "/voice sing add 雨爱")
     checker.check("窗口过期认领不到", "没收到音频" in reply, reply)
 
 with temp_dir() as root:
