@@ -3,6 +3,20 @@
 本文件是版本变更的**唯一事实源**：发版时先改这里，再把对应段落拷进 GitHub Release 说明。
 README 只保留最新一版的要点。
 
+## [0.7.0] - 2026-11-19
+
+### 新增
+
+- **唱歌点播（`[songs]`，默认 `false`）**：管理员先发音频（语音条、mp3/wav/flac 文件或 QQ 文件消息），120 秒内用 `/voice sing add <歌名>` 入库；所有人可用 `/voice sing list` 看清单、`/voice sing <歌名/别名/标签>` 点播。最多 50 首、单首 5 分钟、单文件 20 MB；wav 默认降采样到 16 kHz 单声道（mp3/flac 原样保留）。曲库跟 `filters` 的群聊 / 私聊放行名单，不单独分群。
+- **入库流水线不拦截消息**：入站音频走 `chat.receive.after_process` 观察钩子旁路落盘到 `pending/`（不 abort、不改写原文），其他插件仍能拿到原始消息与下载链接；临时池 1 小时过期、总量超 300 MB 按最旧清理，兼作跨插件取音频的共享入口（`pending/index.json`）。
+- **维护命令**：`set <歌名> name/alias/tags <值>`（全量替换，全角/半角逗号、顿号、空格都算分隔符）、`addforce`（覆盖同名）、`del`（只认歌名，文件移到 `songs/.trash/`）。歌名与别名在库内唯一，重名请改用标签。
+
+### 修改
+
+- `plugin.config_version` 升到 0.7.0；`config.example.toml` 新增 `[songs]` 段 16 项。
+- `/voice` 命令的「仅私聊」规则放开一个例外：`/voice sing` 在群聊里也能用；其余子命令仍是仅私聊、仅管理员。
+- 新增纯标准库音频探测（`core/song_media.py`）：mp3 逐帧算时长、flac 读 STREAMINFO、wav 用 `wave`，**不依赖 ffmpeg**。
+
 ## [0.6.0] - 2026-11-18
 
 ### 新增

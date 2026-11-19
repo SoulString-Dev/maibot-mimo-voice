@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import io
+import json
 import wave
+from pathlib import Path
 
 from __bootstrap import Checker, load_plugin, make_plugin
 
@@ -127,7 +129,8 @@ def test_handler(module) -> int:
     # status
     call(plugin, "/voice status")
     status_text = plugin.ctx.send.texts[-1][1]
-    check.check("status 带版本", "v0.6.0" in status_text)
+    version = json.loads((Path(__file__).resolve().parent.parent / "_manifest.json").read_text(encoding="utf-8"))
+    check.check("status 带版本", f"v{version['version']}" in status_text)
     check.check("status 带超时", "超时 25s" in status_text)
     check.check("status 带会话标签", "QQ 10000002" in status_text)
 

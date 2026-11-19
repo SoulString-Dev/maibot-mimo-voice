@@ -38,6 +38,8 @@ from maibot_sdk.types import ErrorPolicy, HookMode, HookOrder
 from .core import commands as _commands
 from .core import config as _config
 from .core import schedule as _schedule
+from .core import song_library as _songs
+from .core import song_media as _song_media
 from .core import text as _text
 from .core import timeout as _timeout
 from .core import trigger as _trigger
@@ -104,6 +106,7 @@ from .core.constants import (
     SUPPORTED_REFERENCE_SUFFIXES,
     VOICE_SEGMENT_TYPE,
 )
+from .core.pending import PendingPool
 
 
 class _RetryableSynthesisError(RuntimeError):
@@ -180,6 +183,10 @@ class MiMoVoicePlugin(MaiBotPlugin):
         # 插件自己发出的文字（并存文字段 / 命令回执 / 定时文字）：(会话, 文字) -> 过期时间。
         # 这些文字也会经过 send_service.before_send，认出来直接放行，不能再转成语音。
         self._self_sent_texts: Dict[Tuple[str, str], float] = {}
+        # 唱歌点歌（0.7.0）：暂存池句柄、曲库目录缓存与点歌冷却（会话/个人）
+        self._pending_cache: Optional[PendingPool] = None
+        self._sing_group_last: Dict[str, float] = {}
+        self._sing_user_last: Dict[str, float] = {}
 
     # ------------------------------------------------------------------ 生命周期
 
@@ -1266,6 +1273,460 @@ class MiMoVoicePlugin(MaiBotPlugin):
             ttl,
         )
 
+    # ---------------------------------------------------------- 唱歌点歌（0.7.0）
+
+    def _songs_enabled(self) -> bool:
+        return bool(self.config.plugin.enabled and self.config.songs.enabled)
+
+    def _songs_root(self) -> Optional[Path]:
+        """曲库目录：``songs.directory`` 相对插件 data 目录，也可以写绝对路径。"""
+        data_dir = self._data_dir()
+        raw = (self.config.songs.directory or "songs").strip() or "songs"
+        target = Path(raw).expanduser()
+        if not target.is_absolute():
+            if data_dir is None:
+                return None
+            target = data_dir / target
+        return target
+
+    def _songs_file(self) -> Optional[Path]:
+        root = self._songs_root()
+        return root / "songs.json" if root is not None else None
+
+    def _pending_root(self) -> Optional[Path]:
+        data_dir = self._data_dir()
+        return data_dir / "pending" if data_dir is not None else None
+
+    def _pending_pool(self) -> Optional[PendingPool]:
+        root = self._pending_root()
+        if root is None:
+            return None
+        if self._pending_cache is None or self._pending_cache.root != root:
+            self._pending_cache = PendingPool(root)
+        return self._pending_cache
+
+    def _load_songs(self) -> List[Any]:
+        path = self._songs_file()
+        if path is None:
+            return []
+        songs, warnings = _songs.load_library(path)
+        for message in warnings:
+            self._warn_once(f"songs:{message}", "%s", message)
+        return list(songs)
+
+    def _save_songs(self, songs: List[Any]) -> None:
+        path = self._songs_file()
+        if path is not None:
+            _songs.save_library(path, songs)
+
+    @HookHandler(
+        "chat.receive.after_process",
+        name="mimo_voice_collect_song_media",
+        description="把入站语音条/音频文件旁路下载到待入库池（OBSERVE：不拦截、不改写消息）",
+        mode=HookMode.OBSERVE,
+        order=HookOrder.LATE,
+        timeout_ms=30000,
+    )
+    async def collect_song_media(self, message: Optional[Dict[str, Any]] = None, **kwargs: Any) -> None:
+        """旁路收集：其他插件照旧拿到原始消息，我们只是额外下载一份。"""
+        if not self._songs_enabled():
+            return
+        pool = self._pending_pool()
+        if pool is None:
+            return
+        payload = message if isinstance(message, dict) else {}
+        info = payload.get("message_info")
+        info = info if isinstance(info, dict) else {}
+        group_info = info.get("group_info")
+        group_info = group_info if isinstance(group_info, dict) else {}
+        user_info = info.get("user_info")
+        user_info = user_info if isinstance(user_info, dict) else {}
+        session_id = str(payload.get("session_id") or kwargs.get("stream_id") or "").strip()
+        group_id = str(group_info.get("group_id") or "").strip()
+        user_id = str(user_info.get("user_id") or "").strip()
+        scope = str(payload.get("scope") or "").strip() or ("group" if group_id else "private")
+        if not session_id or not self._filter_allows(scope, group_id or session_id, user_id):
+            return
+        try:
+            candidates = await self._inbound_audio(payload)
+        except Exception as exc:  # 收集失败不能影响聊天链路
+            self.ctx.logger.debug("入站音频收集跳过：%s", exc)
+            return
+        for data, suffix, source in candidates:
+            try:
+                await self._stash_song_media(
+                    pool,
+                    data,
+                    suffix=suffix,
+                    source=source,
+                    session_id=session_id,
+                    user_id=user_id,
+                    sender=str(user_info.get("cardname") or user_info.get("nickname") or ""),
+                    message_id=str(payload.get("message_id") or ""),
+                )
+            except OSError as exc:
+                self.ctx.logger.warning("暂存音频失败（%s）", exc)
+
+    async def _inbound_audio(self, payload: Dict[str, Any]) -> List[Tuple[bytes, str, str]]:
+        """从消息段里挑出音频：语音条直接有 wav 字节，文件消息只有下载链接。"""
+        segments = payload.get("raw_message")
+        if not isinstance(segments, list):
+            return []
+        found: List[Tuple[bytes, str, str]] = []
+        for segment in segments:
+            if not isinstance(segment, dict):
+                continue
+            kind = str(segment.get("type") or "")
+            if kind == VOICE_SEGMENT_TYPE:
+                data = self._decode_segment_audio(segment)
+                if data:
+                    found.append((data, ".wav", "voice"))
+                continue
+            if kind != "text":
+                continue
+            url = _song_media.extract_file_url(str(segment.get("data") or ""))
+            if not url:
+                continue
+            data = await self._download_media(url)
+            if data:
+                found.append((data, _song_media.guess_extension(url) or ".mp3", "file"))
+        return found
+
+    @staticmethod
+    def _decode_segment_audio(segment: Dict[str, Any]) -> bytes:
+        raw = segment.get("binary_data_base64")
+        if not isinstance(raw, str) or not raw.strip():
+            return b""
+        try:
+            return base64.b64decode(raw, validate=False)
+        except (ValueError, TypeError):
+            return b""
+
+    async def _download_media(self, url: str) -> bytes:
+        """从 QQ 文件链接下载音频；只认 https + 公网主机，大小按配置截断。"""
+        config = self.config.songs
+        limit = max(1, int(float(config.max_file_mb) * 1024 * 1024))
+        if not url.lower().startswith("https://"):
+            self._warn_once("songs:scheme", "只下载 https 链接（收到 %s），已跳过：", url[:48])
+            return b""
+        host = urlsplit(url).hostname or ""
+        if not host or _config._is_private_host(host):
+            self._warn_once("songs:host", "拒绝下载内网/本机地址（%s），已跳过", host or "?")
+            return b""
+        timeout = aiohttp.ClientTimeout(total=float(config.download_timeout_seconds))
+        try:
+            session = await self._get_session()
+            async with session.get(url, timeout=timeout) as response:
+                if response.status != 200:
+                    self.ctx.logger.warning("音频下载失败：HTTP %s", response.status)
+                    return b""
+                chunks: List[bytes] = []
+                total = 0
+                async for chunk in response.content.iter_chunked(65536):
+                    total += len(chunk)
+                    if total > limit:
+                        self.ctx.logger.warning(
+                            "音频超过 %.1f MB 上限（%s），未暂存",
+                            float(config.max_file_mb),
+                            _song_media.readable_size(total),
+                        )
+                        return b""
+                    chunks.append(chunk)
+            return b"".join(chunks)
+        except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as exc:
+            self.ctx.logger.warning("音频下载失败（%s）", exc)
+            return b""
+
+    async def _stash_song_media(
+        self,
+        pool: PendingPool,
+        data: bytes,
+        *,
+        suffix: str,
+        source: str,
+        session_id: str,
+        user_id: str,
+        sender: str,
+        message_id: str,
+    ) -> None:
+        config = self.config.songs
+        if not data:
+            return
+        limit = max(1, int(float(config.max_file_mb) * 1024 * 1024))
+        if len(data) > limit:
+            return
+        ext = (suffix or ".wav").lower()
+        payload = data
+        if ext == ".wav" and config.downsample:
+            try:
+                lowered = await asyncio.to_thread(_song_media.downsample_wav, data, int(config.downsample_rate))
+            except (ValueError, RuntimeError, OSError) as exc:
+                self.ctx.logger.debug("降采样跳过：%s", exc)
+                lowered = None
+            if lowered:
+                payload = lowered
+        duration = await asyncio.to_thread(_song_media.probe_duration, payload, ext)
+        if duration > float(config.max_duration_seconds) + 1.0:
+            self.ctx.logger.info(
+                "音频 %.0fs 超过 %.0fs 上限，未暂存（/voice sing 不收超长曲目）",
+                duration,
+                float(config.max_duration_seconds),
+            )
+            return
+        item = await asyncio.to_thread(
+            pool.put,
+            payload,
+            suffix=ext,
+            duration_s=duration,
+            session_id=session_id,
+            user_id=user_id,
+            sender=sender,
+            message_id=message_id,
+            source=source,
+        )
+        await asyncio.to_thread(
+            pool.prune,
+            ttl_seconds=float(config.pending_ttl_seconds),
+            max_bytes=int(float(config.pending_max_mb) * 1024 * 1024),
+            max_entries=int(config.pending_max_entries),
+        )
+        self.ctx.logger.info(
+            "已暂存音频 %s（%s，%s，来源=%s）：%d 秒内可 /voice sing add <歌名>",
+            _song_media.readable_size(item.size),
+            _song_media.duration_label(item.duration_s),
+            item.file,
+            source,
+            int(float(config.add_window_seconds)),
+        )
+
+    async def _handle_sing_command(
+        self,
+        stream_id: str,
+        group_id: str,
+        user_id: str,
+        platform: str,
+        rest: str,
+    ) -> None:
+        """``/voice sing`` 的所有分支；群里也能用（其他子命令仍然只限私聊管理员）。"""
+        if not self._songs_enabled():
+            await self._command_reply(stream_id, "唱歌点播没开：让管理员把 songs.enabled 打开。")
+            return
+        scope = "group" if group_id else "private"
+        if not self._filter_allows(scope, group_id or stream_id, user_id):
+            await self._command_reply(stream_id, "这个会话不在语音放行名单里。")
+            return
+        action, name, field_name, value = _songs.parse_sing(rest)
+        admin = _commands.admin_matches(user_id, platform, self.config.commands.admins)
+        if action in ("add", "addforce", "del", "set") and not admin:
+            await self._command_reply(stream_id, "入库、删除、改名只有管理员能用。")
+            return
+        songs = self._load_songs()
+        if action == "list":
+            await self._sing_list(stream_id, songs)
+        elif action == "sing":
+            await self._sing_play(stream_id, songs, name, user_id)
+        elif action in ("add", "addforce"):
+            await self._sing_add(stream_id, songs, name, force=action == "addforce", user_id=user_id)
+        elif action == "del":
+            await self._sing_delete(stream_id, songs, name)
+        elif action == "set":
+            await self._sing_set(stream_id, songs, name, field_name, value)
+
+    async def _sing_list(self, stream_id: str, songs: List[Any]) -> None:
+        lines = _songs.render_library(songs)
+        limit = 60
+        body = lines[:limit]
+        if len(lines) > limit:
+            body.append(f"……还有 {len(lines) - limit} 首")
+        header = f"曲库共 {len(songs)} 首（上限 {int(self.config.songs.max_songs)}）："
+        await self._command_reply(stream_id, "\n".join([header, *body]))
+
+    def _sing_cooldown(self, stream_id: str, user_id: str) -> str:
+        """点歌冷却：先判会话，再判个人；通过时顺手记时间。"""
+        now = time.monotonic()
+        group_seconds = max(0.0, float(self.config.songs.sing_group_cooldown_seconds))
+        user_seconds = max(0.0, float(self.config.songs.sing_user_cooldown_seconds))
+        last_group = self._sing_group_last.get(stream_id, 0.0)
+        if group_seconds and now - last_group < group_seconds:
+            wait = int(group_seconds - (now - last_group)) + 1
+            return f"这个会话刚点过，{wait} 秒后再来"
+        last_user = self._sing_user_last.get(user_id, 0.0) if user_id else 0.0
+        if user_seconds and user_id and now - last_user < user_seconds:
+            wait = int(user_seconds - (now - last_user)) + 1
+            return f"点得有点快，{wait} 秒后再试"
+        self._sing_group_last[stream_id] = now
+        if user_id:
+            self._sing_user_last[user_id] = now
+        if len(self._sing_group_last) > _TTL_CACHE_MAX_ENTRIES:
+            self._sing_group_last.clear()
+        if len(self._sing_user_last) > _TTL_CACHE_MAX_ENTRIES:
+            self._sing_user_last.clear()
+        return ""
+
+    async def _sing_play(self, stream_id: str, songs: List[Any], query: str, user_id: str) -> None:
+        if not query:
+            await self._command_reply(stream_id, "点歌要给歌名：/voice sing <歌名/别名/标签>")
+            return
+        if not self._session_switch.get(stream_id, True):
+            await self._command_reply(stream_id, "本会话语音已关闭（/voice on 可恢复）。")
+            return
+        matches = _songs.match_songs(songs, query)
+        if not matches:
+            await self._command_reply(stream_id, f"没有找到「{query}」，/voice sing list 看看有哪些。")
+            return
+        blocked = self._sing_cooldown(stream_id, user_id)
+        if blocked:
+            await self._command_reply(stream_id, blocked)
+            return
+        song = random.choice(matches)
+        root = self._songs_root()
+        if root is None:
+            await self._command_reply(stream_id, "找不到插件数据目录，无法读取曲库。")
+            return
+        path = root / song.file
+        try:
+            audio = path.read_bytes()
+        except OSError:
+            await self._command_reply(stream_id, f"「{song.name}」的音频文件不见了，让管理员重新入库。")
+            return
+        limit = max(1, int(float(self.config.songs.max_file_mb) * 1024 * 1024))
+        if len(audio) > limit:
+            await self._command_reply(stream_id, f"「{song.name}」文件超过 {float(self.config.songs.max_file_mb):.1f} MB 上限。")
+            return
+        if not await self._send_voice(stream_id, audio):
+            await self._command_reply(stream_id, "语音发送失败，稍后再试。")
+            return
+        self.ctx.logger.info(
+            "点歌已发送：%s → %s（%s，%.1f MB，命中 %d 条）",
+            song.name,
+            stream_id,
+            _song_media.duration_label(song.duration_s or len(audio) / 16000.0),
+            len(audio) / 1048576.0,
+            len(matches),
+        )
+
+    async def _sing_add(self, stream_id: str, songs: List[Any], name: str, *, force: bool, user_id: str) -> None:
+        config = self.config.songs
+        clean = (name or "").strip()
+        if not clean:
+            await self._command_reply(stream_id, "要一个歌名：/voice sing add <歌名>")
+            return
+        pool = self._pending_pool()
+        if pool is None:
+            await self._command_reply(stream_id, "找不到插件数据目录，无法入库。")
+            return
+        item = await asyncio.to_thread(
+            pool.claim,
+            session_id=stream_id,
+            user_id=user_id,
+            window_seconds=float(config.add_window_seconds),
+        )
+        if item is None:
+            await self._command_reply(
+                stream_id,
+                f"最近 {int(float(config.add_window_seconds))} 秒内没收到音频：先发一条语音或 mp3/wav/flac，"
+                f"再马上发 /voice sing add {clean}",
+            )
+            return
+        root = self._songs_root()
+        if root is None:
+            await self._command_reply(stream_id, "找不到插件数据目录，无法入库。")
+            return
+        try:
+            audio = await asyncio.to_thread(item.path_in(pool.root).read_bytes)
+        except OSError:
+            await self._command_reply(stream_id, "暂存的音频已经过期，重新发一次再入库。")
+            return
+        limit = max(1, int(float(config.max_file_mb) * 1024 * 1024))
+        if len(audio) > limit:
+            await self._command_reply(stream_id, f"这个文件超过 {float(config.max_file_mb):.1f} MB 上限。")
+            return
+        ext = item.ext or ".wav"
+        file_name = f"{item.sha256[:16]}{ext}"
+        try:
+            await asyncio.to_thread(root.mkdir, parents=True, exist_ok=True)
+            await asyncio.to_thread((root / file_name).write_bytes, audio)
+        except OSError as exc:
+            await self._command_reply(stream_id, f"写入曲库失败：{exc}")
+            return
+        duration = item.duration_s or float(await asyncio.to_thread(_song_media.probe_duration, audio, ext))
+        if duration > float(config.max_duration_seconds) + 1.0:
+            await self._command_reply(
+                stream_id,
+                f"这首歌 {_song_media.duration_label(duration)}，超过 {int(float(config.max_duration_seconds))} 秒上限。",
+            )
+            return
+        previous = _songs.find_conflict(songs, [clean])
+        song, error = _songs.add_song(
+            songs,
+            clean,
+            file_name=file_name,
+            duration_s=duration,
+            added_by=user_id,
+            now=time.time(),
+            max_songs=int(config.max_songs),
+            force=force,
+        )
+        if song is None or error:
+            await self._command_reply(stream_id, error or "入库失败。")
+            return
+        try:
+            self._save_songs(songs)
+        except OSError as exc:
+            await self._command_reply(stream_id, f"保存曲库失败：{exc}")
+            return
+        if previous is not None and previous.file and previous.file != file_name:
+            await asyncio.to_thread(self._quiet_unlink, root / previous.file)
+        await asyncio.to_thread(pool.discard, item)
+        verb = "已替换" if previous is not None else "已入库"
+        await self._command_reply(
+            stream_id,
+            f"{verb}「{song.name}」（{_song_media.duration_label(song.duration_s)}，"
+            f"{_song_media.readable_size(len(audio))}）：/voice sing {song.name}",
+        )
+        self.ctx.logger.info("曲库新增：%s（%s，%s）", song.name, file_name, _song_media.readable_size(len(audio)))
+
+    async def _sing_delete(self, stream_id: str, songs: List[Any], name: str) -> None:
+        song, error = _songs.delete_song(songs, name)
+        if song is None or error:
+            await self._command_reply(stream_id, error or "删除失败。")
+            return
+        try:
+            self._save_songs(songs)
+        except OSError as exc:
+            await self._command_reply(stream_id, f"保存曲库失败：{exc}")
+            return
+        root = self._songs_root()
+        if root is not None and song.file:
+            trash = root / ".trash"
+            try:
+                await asyncio.to_thread(trash.mkdir, parents=True, exist_ok=True)
+                await asyncio.to_thread((root / song.file).replace, trash / song.file)
+            except OSError:
+                pass
+        await self._command_reply(stream_id, f"已删除「{song.name}」（音频移到 .trash，可手工找回）。")
+        self.ctx.logger.info("曲库删除：%s", song.name)
+
+    async def _sing_set(self, stream_id: str, songs: List[Any], name: str, field_name: str, value: str) -> None:
+        song, error = _songs.set_song_field(songs, name, field_name, value)
+        if song is None or error:
+            await self._command_reply(stream_id, error or "修改失败。")
+            return
+        try:
+            self._save_songs(songs)
+        except OSError as exc:
+            await self._command_reply(stream_id, f"保存曲库失败：{exc}")
+            return
+        await self._command_reply(stream_id, f"已更新「{song.name}」的 {field_name}。")
+
+    @staticmethod
+    def _quiet_unlink(path: Path) -> None:
+        try:
+            if path.exists():
+                path.unlink()
+        except OSError:
+            pass
+
     def _trigger_rules(self) -> List[Tuple[str, str]]:
         """把配置里的规则换成 ``(词, 位置)``；空词直接跳过。"""
 
@@ -1618,7 +2079,7 @@ class MiMoVoicePlugin(MaiBotPlugin):
 
     @Command(
         "voice",
-        description="MiMo 语音手动命令：/voice on|off|test|status|help|say（仅私聊、仅管理员）",
+        description="MiMo 语音手动命令：/voice on|off|test|status|help|say|sing（除 sing 外仅私聊、仅管理员）",
         pattern=r"^/(?:voice|vc)(?:\s+.*)?$",
     )
     async def handle_voice_command(self, **kwargs: Any) -> Tuple[bool, Optional[str], int]:
@@ -1626,7 +2087,8 @@ class MiMoVoicePlugin(MaiBotPlugin):
 
         权限不交给宿主的 ``operator``：那套白名单在宿主配置里，插件拿不到多管理员列表。
         这里自己判 ``commands.admins``（可写 ``10000002`` 或 ``qq:10000002``），失败也给回执。
-        命令只在私聊生效——群里的 ``/voice`` 按普通消息处理，避免在群里刷屏。
+        除 ``sing``（唱歌点播，群里也能用）外，命令只在私聊生效——群里的 ``/voice`` 按普通消息处理，
+        避免在群里刷屏。
         """
         parsed = _commands.parse_command(str(kwargs.get("text") or ""))
         if parsed is None or not self.config.commands.enabled:
@@ -1636,6 +2098,13 @@ class MiMoVoicePlugin(MaiBotPlugin):
         group_id = str(kwargs.get("group_id") or "").strip()
         user_id = str(kwargs.get("user_id") or "").strip()
         platform = str(kwargs.get("platform") or "qq").strip() or "qq"
+
+        sub, rest = parsed
+        if sub == "sing":
+            # 唱歌点播是唯一允许在群里用的子命令：list / 点歌谁都能发，
+            # 入库与增删改在 _handle_sing_command 里再判管理员。
+            await self._handle_sing_command(stream_id, group_id, user_id, platform, rest)
+            return True, None, 1
 
         if group_id:
             if stream_id:
@@ -1652,7 +2121,6 @@ class MiMoVoicePlugin(MaiBotPlugin):
                 await self._command_reply(stream_id, denied)
             return True, None, 1
 
-        sub, rest = parsed
         if sub in ("", "help"):
             if stream_id:
                 await self._command_reply(stream_id, _commands.render_help())

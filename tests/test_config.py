@@ -176,7 +176,7 @@ checker.equal("模板 config_version", template["plugin"]["config_version"], con
 checker.equal("sdk 上限不含 99 后缀", manifest["sdk"]["max_version"], "2.12.99")
 checker.check("模板键集合包含模型全部字段", set(template.keys()) == {
     "plugin", "general", "trigger", "filters", "voice", "mimo", "delivery", "commands", "triggers",
-    "api", "scheduled"
+    "api", "scheduled", "songs"
 }, f"{sorted(template.keys())}")
 
 sys.exit(checker.report())

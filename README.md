@@ -14,6 +14,7 @@
 - 可选「语音 + 文字并存」：回复拆成文字 + 语音两条消息（默认关，只发语音）。
 - 内建定时语音：到点主动往指定群 / QQ 发一条语音（默认关）。
 - 对外 API `voice_say`：其他插件或脚本可以直接要一段语音，也可指定会话发送。
+- 本地曲库点歌：管理员把 mp3/wav/flac 入库存成「歌名」，群里或私聊 `/voice sing 歌名` 直接发语音条。
 - 合成前清洗文本（表情、引号、波浪号、省略号、重复标点），并用风格指令压住音色漂移；英文默认只删 `ww` / `emmm` 这类复读口癖，`LLM`、`token`、`cos` 等真词原样朗读。
 
 | 与上游的差异 | 原因 |
@@ -230,6 +231,49 @@ text = "早上好，今天也要加油呀"
 
 宿主调用 API 时**不会带上调用方身份**，所以这里用 `api.token` 做可选的共享口令，而不是按插件 id 白名单。默认 `api.enabled = true`、`token` 为空（本机内网使用；要防误调就设一个随机串）。全局限流 `api.rate_limit_seconds` 默认 5 秒。
 
+## 唱歌点播（0.7.0）
+
+把本地曲库里的歌当语音条发出来。一首歌最多 5 分钟（`max_duration_seconds`，5–1800 秒）、曲库最多 50 首，mp3 / wav / flac 都可以，**不需要 ffmpeg**。
+
+**入库**（管理员，私聊或群聊都行）：先发音频——语音条、mp3/wav/flac 文件，或 QQ 文件消息——然后在 120 秒内发
+
+```
+/voice sing add 雨爱
+```
+
+插件会把音频写进数据目录的 `songs/` 下。同名（含别名）会被拒绝，要覆盖就加 `force`：
+
+```
+/voice sing addforce 雨爱
+```
+
+**点播**（所有人）：
+
+```
+/voice sing list          曲库清单（合并转发消息）
+/voice sing 雨爱          按歌名点歌，多个命中随机挑一首
+/voice sing 下雨          ｜别名｜标签同样能命中
+```
+
+**维护**（管理员）：
+
+```
+/voice sing set 雨爱 alias 下雨,雨天    全量替换别名（逗号全角/半角、顿号、空格都算分隔符）
+/voice sing set 雨爱 tags 杨丞琳        全量替换标签
+/voice sing set 雨爱 name 雨爱(现场版)  改名
+/voice sing del 雨爱                   删除（只认歌名，文件移到 songs/.trash/，可手工找回）
+```
+
+规则：
+
+- 歌名与别名在库内**唯一**；重名（比如同一首歌的两个版本）请改用标签区分。
+- `del` 只认歌名，避免拿别名误删；要删别名请先 `set ... alias` 改成只剩歌名。
+- 冷却：同一会话 30 秒、同一人 10 秒（`sing_group_cooldown_seconds` / `sing_user_cooldown_seconds`）。
+- 会话被 `/voice off` 关掉后点歌直接拒绝；曲库不分群，跟随 `filters` 的群聊 / 私聊放行名单。
+- 收到的音频先落在 `pending/`（`pending/index.json` 兼作跨插件取音频的入口），1 小时过期或总量超 300 MB 按最旧清理；临时池不拦截消息，其他插件仍能拿到原文。
+
+> **版权**：只放你自己有权使用的音频。请确保你保障了原作者的音乐著作权及许可协议——本插件不提供任何下载或转存能力。
+
 ## 群聊 / 私聊过滤
 
 两者互不影响，例如"群聊只放行一个群、私聊全放行"：
@@ -243,7 +287,7 @@ private_mode = "all"
 
 `group_mode` 与 `private_mode` 都不是 `all` 时，插件会记录入站消息的群号 / 对方 QQ 号（`chat.receive.before_process`），出站时按名单判断；两者都是 `all` 时不记录，零额外开销。拿不到对方身份时（映射过期等）一律保持文字，不误放行。
 
-## 配置说明（共 55 项，日常只需动前 12 项）
+## 配置说明（共 71 项，日常只需动前 12 项）
 
 ### 基础
 
@@ -333,8 +377,11 @@ private_mode = "all"
 │   ├── trigger.py               # 点名窗口 / 情绪加分
 │   ├── timeout.py               # 失败归类
 │   ├── schedule.py              # 定时表的时间 / 星期解析
-│   └── commands.py              # /voice 解析与回执文案
-├── tests/                       # 369 条断言，不依赖 pytest
+│   ├── commands.py              # /voice 解析与回执文案
+│   ├── song_library.py          # 曲库：songs.json 读写 / 匹配 / 别名与标签
+│   ├── song_media.py            # 音频探测（mp3 / wav / flac 时长）与 wav 降采样
+│   └── pending.py               # 临时池：入站音频旁路落盘、认领与过期清理
+├── tests/                       # 491 条断言，不依赖 pytest
 ├── config.example.toml
 ├── _manifest.json
 ├── assets/icon.svg              # 商店图标
@@ -396,6 +443,13 @@ private_mode = "all"
 
 ## 更新日志
 
+### 0.7.0
+
+- **唱歌点播**（`[songs]`，默认关）：管理员发音频后 `/voice sing add <歌名>` 入库；所有人 `/voice sing list` 看清单、`/voice sing <歌名/别名/标签>` 点播。最多 50 首、单首 5 分钟、单文件 20 MB，mp3/wav/flac 直发。
+- **旁路收集**：入站音频走观察钩子落盘到 `pending/`，不拦截、不改写原文，其他插件照旧可用；1 小时过期、总量 300 MB 上限。
+- **维护命令**：`set name/alias/tags`（全量替换）、`addforce`、`del`（只认歌名）；歌名与别名库内唯一。
+- `/voice sing` 在群聊里也能用（其余命令仍是仅私聊、仅管理员）；新增纯标准库音频探测，不依赖 ffmpeg。
+
 ### 0.6.0
 
 - **语音 + 文字并存**（`delivery.keep_text`，默认关）：打开后回复拆成两条消息——文字（模型原文）+ 语音（`text_first = false` 可反序）；文字等语音就绪才发，合成失败只发文字。
@@ -439,7 +493,7 @@ python -c "import tomllib; tomllib.load(open('config.example.toml','rb'))"
 pip install -r requirements-dev.txt
 ruff check .
 mypy plugin.py core   # 需先装 maibot-plugin-sdk，否则基类被当作 Any，会漏掉 self.config 的类型问题
-python tests/run_all.py     # 十一组共 369 条断言（文本/音频/配置/超时/触发/命令/触发词/定时/并存/API）
+python tests/run_all.py     # 十四组共 491 条断言（文本/音频/配置/超时/触发/命令/触发词/定时/并存/API/点播/曲库/探测）
 ```
 
 Windows 上等价的一条命令：`pwsh -File tools/run_checks.ps1`（已处理控制台编码与临时目录的差异）。

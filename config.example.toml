@@ -1,5 +1,5 @@
 # ================================================================
-# MiMo TTS 语音回复 配置模板（0.6.0）
+# MiMo TTS 语音回复 配置模板（0.7.0）
 # ================================================================
 #
 # 怎么用：
@@ -23,7 +23,7 @@
 # 总开关：关掉后所有回复都保持文字。
 enabled = true
 # 配置文件版本，内部用来做迁移，不要手改。
-config_version = "0.6.0"
+config_version = "0.7.0"
 
 [mimo]
 # ---- MiMo 接口 ----
@@ -225,3 +225,36 @@ enabled = false
 # target = "g123456789"   # 群号或 QQ 号，可带 g/u 前缀
 # text = "早安，今天也要加油。"
 # content = "text"        # 目前只支持 text；llm 预留给后续版本
+
+[songs]
+# ---- 唱歌点播（0.7.0 起，默认关闭）----
+# 把本地曲库里的歌当语音条发出来：管理员先发音频（语音条或 mp3/wav/flac 文件都行），
+# 再在 add_window_seconds 内发 /voice sing add <歌名> 入库；所有人可用 /voice sing <歌名> 点播。
+enabled = false
+# 曲库目录：相对 data 目录，也可以写绝对路径。
+directory = "songs"
+# 最多几首（1–500）。
+max_songs = 50
+# 单首时长上限（秒，5–1800）：实测 QQ 语音条能直发 139 秒整首，默认给到 5 分钟。
+max_duration_seconds = 300.0
+# 单文件大小上限（MB，0.1–200）。
+max_file_mb = 20.0
+# 降采样（默认开）：入库的 wav 转成单声道 16 kHz 省 3/4 空间；mp3/flac 不动。
+downsample = true
+downsample_rate = 16000
+# 发完音频后多久内可以用 add 认领（秒，10–3600）。
+add_window_seconds = 120.0
+# 临时池：收到的音频先落盘，等被认领或过期（秒）后清理。
+pending_ttl_seconds = 3600.0
+# 临时池总容量上限（MB）与条数上限，超了按最旧先删。
+pending_max_mb = 300.0
+pending_max_entries = 20
+# 下载 QQ 文件链接的超时（秒）。
+download_timeout_seconds = 20.0
+# 意图层触发词（空格分隔，留空 = 只认命令），命中后把候选歌名给模型挑。
+trigger_words = ""
+# 意图层给模型看的候选数（1–10）。
+intent_candidates = 5
+# 点播冷却：同一会话 / 同一人 两次点歌的最小间隔（秒）。
+sing_group_cooldown_seconds = 30.0
+sing_user_cooldown_seconds = 10.0

@@ -33,7 +33,7 @@ class PluginSectionConfig(PluginConfigBase):
     __ui_label__ = "基础设置"
 
     enabled: bool = Field(default=True, description="是否启用语音回复")
-    config_version: str = Field(default="0.6.0", description="配置文件版本号（内部使用，无需修改）")
+    config_version: str = Field(default="0.7.0", description="配置文件版本号（内部使用，无需修改）")
 
 
 class GeneralConfig(PluginConfigBase):
@@ -445,6 +445,47 @@ class DeliveryConfig(PluginConfigBase):
     )
 
 
+class SongsConfig(PluginConfigBase):
+    """唱歌点播（0.7.0 起）：本地曲库、暂存池与限流"""
+
+    __ui_label__ = "唱歌点播"
+
+    enabled: bool = Field(default=False, description="是否启用唱歌点播；关闭时 /voice sing 一律回复未开启")
+    directory: str = Field(default="songs", description="曲库目录，相对插件 data 目录；也可以写绝对路径")
+    max_songs: int = Field(default=50, ge=1, le=500, description="曲库最多几首（用户定 50）")
+    max_duration_seconds: float = Field(
+        default=300.0,
+        ge=5.0,
+        le=1800.0,
+        description="单曲时长上限（秒），默认 5 分钟；实测语音条直发 139.78 秒无碍，不拆分",
+    )
+    max_file_mb: float = Field(default=20.0, ge=0.1, le=200.0, description="单个音频文件大小上限（MB）")
+    downsample: bool = Field(
+        default=True,
+        description="入站 wav 降采样后再入库（mp3/flac 解不了码，保持原样）；16000 Hz 单声道省 3/4 空间",
+    )
+    downsample_rate: int = Field(default=16000, ge=8000, le=48000, description="降采样目标采样率（Hz）")
+    add_window_seconds: float = Field(
+        default=120.0,
+        ge=10.0,
+        le=3600.0,
+        description="/voice sing add 最多向上追溯多少秒内的那条音频（用户定 120 秒）",
+    )
+    pending_ttl_seconds: float = Field(default=3600.0, ge=60.0, le=86400.0, description="暂存池条目存活时间（秒）")
+    pending_max_mb: float = Field(
+        default=300.0,
+        ge=10.0,
+        le=4096.0,
+        description="暂存池总容量上限（MB，用户要求控制总量），超了先删最旧的",
+    )
+    pending_max_entries: int = Field(default=20, ge=1, le=200, description="暂存池最多保留几条")
+    download_timeout_seconds: float = Field(default=20.0, ge=3.0, le=120.0, description="下载 QQ 文件链接的超时（秒）")
+    trigger_words: str = Field(default="", description="意图层触发词，逗号分隔；空=只走命令，不注入候选")
+    intent_candidates: int = Field(default=5, ge=1, le=10, description="意图层最多给模型几条候选")
+    sing_group_cooldown_seconds: float = Field(default=30.0, ge=0.0, le=600.0, description="同一会话点歌的冷却（秒）")
+    sing_user_cooldown_seconds: float = Field(default=10.0, ge=0.0, le=600.0, description="同一个人点歌的冷却（秒）")
+
+
 def _is_private_host(host: str) -> bool:
     """判断主机名是否指向本机、内网、链路本地或云元数据地址。"""
     lowered = (host or "").strip().strip(".").lower()
@@ -499,6 +540,7 @@ class MiMoVoiceConfig(PluginConfigBase):
     triggers: TriggerWordsConfig = Field(default_factory=TriggerWordsConfig)
     api: ApiConfig = Field(default_factory=ApiConfig)
     scheduled: ScheduledConfig = Field(default_factory=ScheduledConfig)
+    songs: SongsConfig = Field(default_factory=SongsConfig)
 
 
 # `from __future__ import annotations` 让 pydantic 收到字符串注解：统一在这里重建一次，
@@ -516,6 +558,7 @@ for _config_model in (
     ApiConfig,
     ScheduleEntry,
     ScheduledConfig,
+    SongsConfig,
     MiMoVoiceConfig,
 ):
     _config_model.model_rebuild(_types_namespace=globals())

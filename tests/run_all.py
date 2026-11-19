@@ -13,7 +13,8 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 # 子进程强制 UTF-8：Windows 默认 GBK 控制台会让测试里的 emoji 直接 UnicodeEncodeError。
 CHILD_ENV = {**os.environ, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"}
-SUITES = ["test_text.py", "test_audio.py", "test_config.py", "test_timeout.py", "test_trigger.py", "test_commands.py", "test_triggers.py", "test_schedule.py", "test_delivery.py", "test_api.py", "test_scheduled.py"]
+SUITES = ["test_text.py", "test_audio.py", "test_config.py", "test_timeout.py", "test_trigger.py", "test_commands.py", "test_triggers.py", "test_schedule.py", "test_delivery.py", "test_api.py", "test_scheduled.py",
+    "test_song_library.py", "test_audio_probe.py", "test_songs.py"]
 
 
 def main() -> int:

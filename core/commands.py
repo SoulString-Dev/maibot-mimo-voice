@@ -28,6 +28,7 @@ _USAGE = {
     "status": "/voice status",
     "help": "/voice help",
     "say": "/voice say <群号或QQ号> <文本>",
+    "sing": "/voice sing <歌名/别名/标签>",
 }
 
 
@@ -125,14 +126,24 @@ def usage_of(sub: str) -> str:
 
 
 def render_help() -> str:
-    """``/voice help`` 的正文；命令都只对管理员开放，所以这里不区分身份。"""
+    """``/voice help`` 的正文；除 ``sing`` 外都只对私聊管理员开放，这里按此标注。"""
     return "\n".join(
         [
-            "MiMo 语音命令（仅私聊、仅管理员）",
+            "MiMo 语音命令（除 /voice sing 外，仅私聊、仅管理员）",
             "/voice on | off          开启/关闭当前会话的自动语音",
             "/voice test <文本>        立刻朗读这段文本（当前会话）",
             "/voice say <目标> <文本>  把语音发到指定群/QQ，目标可写 g群号 或 uQQ号",
             "/voice status            查看版本、音色、触发参数与最近合成情况",
+            "",
+            "唱歌点播（群里也能用）：",
+            "/voice sing list                   曲库列表",
+            "/voice sing <歌名/别名/标签>        发一首，多首命中随机取一",
+            "以下仅管理员：",
+            "/voice sing add <歌名>              把最近 2 分钟内收到的那条音频入库",
+            "/voice sing addforce <歌名>         同上，但允许覆盖同名",
+            "/voice sing del <歌名>              删除（只认歌名）",
+            "/voice sing set <歌名> alias <值>   改别名/标签（全量替换，逗号分隔）",
+            "",
             "/voice help              显示本帮助",
             "也可以把 /voice 换成 /vc。",
         ]
