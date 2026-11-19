@@ -9,6 +9,10 @@ import re
 from dataclasses import dataclass
 from typing import Any, List, Optional, Sequence, Tuple
 
+# 用户可配的正则上限：匹配每条消息都要跑，太长/太多的正则容易写出灾难性回溯
+MAX_PATTERN_LENGTH = 200
+MAX_PATTERNS = 20
+
 # 默认只认「唱/来/放/点 + 一? + 首/个」这一种说法（用户 2026-11-20 指定）。
 # 「唱首」「来一个」「放一首」都命中；配置页整行替换即可换成任意正则。
 DEFAULT_PATTERNS: Tuple[str, ...] = ("(?:唱|来|放|点)一?(?:首|个)",)
@@ -51,9 +55,16 @@ def compile_patterns(raw: Any) -> Tuple[List[re.Pattern[str]], List[str]]:
 
     patterns: List[re.Pattern[str]] = []
     warnings: List[str] = []
-    for line in lines:
+    if len(lines) > MAX_PATTERNS:
+        warnings.append(f"intent_patterns 只取前 {MAX_PATTERNS} 条，其余已忽略")
+    for line in lines[:MAX_PATTERNS]:
         text = str(line or "").strip()
         if not text:
+            continue
+        if len(text) > MAX_PATTERN_LENGTH:
+            warnings.append(
+                f"intent_patterns 里的正则太长（{len(text)} 字符，上限 {MAX_PATTERN_LENGTH}），已跳过"
+            )
             continue
         try:
             patterns.append(re.compile(text, re.IGNORECASE))

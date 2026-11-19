@@ -313,6 +313,19 @@ private_mode = "all"
 
 `group_mode` 与 `private_mode` 都不是 `all` 时，插件会记录入站消息的群号 / 对方 QQ 号（`chat.receive.before_process`），出站时按名单判断；两者都是 `all` 时不记录，零额外开销。拿不到对方身份时（映射过期等）一律保持文字，不误放行。
 
+## 为什么需要 `api.call` 能力（商店审核说明）
+
+0.7.0 的「文件入库」需要音频的下载地址，但适配器把 QQ 文件消息转成文本时只给文件名与大小
+（`[文件] yuai_cover_f0.mp3，大小: 5594426`），没有 url。插件因此声明了 `api.call`，在**用户主动执行**
+`/voice sing add`、且当前会话里刚发过音频时，调用适配器自己的公开 API 补地址：
+
+1. `adapter.napcat.message.get_friend_msg_history` / `get_group_msg_history`：取最近几条消息，按文件名与大小找到那个文件段，拿到 `file_id`；
+2. `adapter.napcat.file.get_private_file_url` / `get_group_file_url`：用 `file_id` 换一次下载地址。
+
+只在入库瞬间调用，参数固定、不遍历历史、不读取聊天内容以外的信息；拿到的地址只用于下载这一个音频文件，
+下载前还会校验域名与内网地址（见上文「松」与安全说明）。不开启唱歌点播（`songs.enabled = false`，默认）
+时这些 API 一次都不会被调用。
+
 ## 配置说明（共 75 项，日常只需动前 12 项）
 
 ### 基础

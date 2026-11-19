@@ -104,6 +104,6 @@ checker.equal("坏 wav 返回 None", media.downsample_wav(b"RIFFxxxx", 16000), N
 checker.equal("字节数 B", media.readable_size(512), "512 B")
 checker.equal("字节数 MB", media.readable_size(5 * 1024 * 1024), "5.0 MB")
 checker.equal("时长标签", media.duration_label(139.78), "2:20")
-checker.equal("时长标签为 0", media.duration_label(0), "0:00")
+checker.equal("时长未知时给人看的话", media.duration_label(0), "时长未知")
 
 sys.exit(checker.report())

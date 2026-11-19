@@ -262,6 +262,9 @@ def readable_size(size: int) -> str:
 
 def duration_label(seconds: float) -> str:
     total = max(0, round(float(seconds)))
+    if total <= 0:
+        # mp3/flac 头部损坏或用了没见过的编码时探测会失败；文件本身往往还能直接播
+        return "时长未知"
     return f"{total // 60}:{total % 60:02d}"
 
 
@@ -271,6 +274,7 @@ __all__: List[str] = [
     "extract_file_url",
     "guess_extension",
     "guess_path",
+    "is_qq_media_url",
     "probe_duration",
     "readable_size",
 ]

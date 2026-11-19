@@ -111,6 +111,9 @@ def song_from_dict(raw: Any) -> Optional[Song]:
         return None
     if file_name.startswith(("/", "\\")) or ".." in Path(file_name).parts:
         return None
+    if Path(file_name).name != file_name or "\\" in file_name:
+        # 曲库文件永远平铺在 songs/ 下；带路径分隔符的条目一律视为被篡改
+        return None
     aliases_raw = raw.get("aliases") or []
     tags_raw = raw.get("tags") or []
     if not isinstance(aliases_raw, list) or not isinstance(tags_raw, list):

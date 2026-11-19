@@ -23,6 +23,7 @@ import json
 import math
 import random
 import shutil
+import socket
 import subprocess
 import time
 import tomllib
@@ -32,7 +33,7 @@ import wave
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, cast
-from urllib.parse import urlsplit
+from urllib.parse import urljoin, urlsplit
 
 import aiohttp
 from maibot_sdk import API, CONFIG_RELOAD_SCOPE_SELF, Command, HookHandler, MaiBotPlugin, Tool
@@ -71,6 +72,7 @@ from .core.constants import (
     _KEEP_TEXT_DELAY_SECONDS,
     _MAIBOT_CONFIG_PATHS,
     _MAX_AUDIO_SECONDS,
+    _MAX_REDIRECT_HOPS,
     _MIN_AUDIO_BYTES,
     _MIN_AUDIO_SECONDS,
     _MIN_RMS_DBFS,
@@ -98,6 +100,7 @@ from .core.constants import (
     _SELF_SENT_MAX_ENTRIES,
     _SELF_SENT_TEXT_TTL_SECONDS,
     _SILENCE_DBFS,
+    _SING_LIST_NODE_LINES,
     _SOFT_LIMIT_CEILING,
     _SONG_CUE_TTL_SECONDS,
     _SONG_HOUSEKEEPING_SECONDS,
@@ -125,6 +128,15 @@ class _RetryableSynthesisError(RuntimeError):
 
 class _SynthesisBusy(RuntimeError):
     """并发已满，按 delivery.skip_when_busy 直接回退文字。"""
+
+
+def _forward_node(text: str) -> Dict[str, Any]:
+    """合并转发里的一个节点；昵称固定「曲库」，不需要机器人 QQ 号。"""
+    return {
+        "user_nickname": "曲库",
+        "user_id": "",
+        "content": [{"type": "text", "data": text}],
+    }
 
 
 def _payload_seconds(audio: bytes) -> Optional[float]:
@@ -1869,45 +1881,81 @@ class MiMoVoicePlugin(MaiBotPlugin):
         """从 QQ 文件链接下载音频；只认 http(s) + 公网主机，大小按配置截断。
 
         QQ 文件的 CDN 地址目前只有 ``http://<公网 IP>:80/qqdownloadftnv5?...``（2026-11-19 实测），
-        所以不能强制 https；作为补偿，主机必须是公网地址（内网 / 本机 / 元数据地址一律拒绝）。
+        所以不能强制 https；作为补偿：
+
+        * 主机必须是公网地址——不仅看字面量，还要看 DNS 解析结果（防域名指向内网）；
+        * 不自动跟随跳转，每一跳都重新校验（防公网地址 302 到内网）；
+        * 文本来源的链接还必须是 QQ 域名（见 ``is_qq_media_url``）。
         """
         config = self.config.songs
         limit = max(1, int(float(config.max_file_mb) * 1024 * 1024))
-        scheme = urlsplit(url).scheme.lower()
+        timeout = aiohttp.ClientTimeout(total=float(config.download_timeout_seconds))
+        current = url
+        for _hop in range(_MAX_REDIRECT_HOPS + 1):
+            problem = await self._media_url_problem(current, text_source=text_source)
+            if problem:
+                self._warn_once(f"songs:url:{problem}", "音频链接不可用（%s）：%s", problem, current[:64])
+                return b""
+            try:
+                session = await self._get_session()
+                async with session.get(current, timeout=timeout, allow_redirects=False) as response:
+                    if response.status in (301, 302, 303, 307, 308):
+                        target = urljoin(current, str(response.headers.get("Location") or ""))
+                        if not target:
+                            return b""
+                        current = target
+                        continue
+                    if response.status != 200:
+                        self.ctx.logger.warning("音频下载失败：HTTP %s", response.status)
+                        return b""
+                    chunks: List[bytes] = []
+                    total = 0
+                    async for chunk in response.content.iter_chunked(65536):
+                        total += len(chunk)
+                        if total > limit:
+                            self.ctx.logger.warning(
+                                "音频超过 %.1f MB 上限（%s），未暂存",
+                                float(config.max_file_mb),
+                                _song_media.readable_size(total),
+                            )
+                            return b""
+                        chunks.append(chunk)
+                    return b"".join(chunks)
+            except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as exc:
+                self.ctx.logger.warning("音频下载失败（%s）", exc)
+                return b""
+        self._warn_once("songs:redirect", "音频链接跳转超过 %d 次，已放弃", _MAX_REDIRECT_HOPS)
+        return b""
+
+    async def _media_url_problem(self, url: str, *, text_source: bool) -> str:
+        """返回链接的问题（空串=可以下）；只做校验，不产生网络请求以外的副作用。"""
+        parts = urlsplit(url)
+        scheme = parts.scheme.lower()
         if scheme not in ("http", "https"):
-            self._warn_once("songs:scheme", "只下载 http(s) 链接（收到 %s），已跳过：", url[:48])
-            return b""
-        host = urlsplit(url).hostname or ""
-        if not host or _config._is_private_host(host):
-            self._warn_once("songs:host", "拒绝下载内网/本机地址（%s），已跳过", host or "?")
-            return b""
+            return "scheme"
+        host = parts.hostname or ""
+        if not host:
+            return "host"
+        if _config._is_private_host(host):
+            return "private-host"
         if text_source and not _song_media.is_qq_media_url(url):
             # 文本里的链接任何人都能照着 [文件] x.mp3，链接: http://… 的格式伪造
-            self._warn_once("songs:text-url", "文本里的下载链接不是 QQ 域名（%s），已跳过", host)
-            return b""
-        timeout = aiohttp.ClientTimeout(total=float(config.download_timeout_seconds))
+            return "text-url"
+        if not await asyncio.to_thread(self._host_resolves_public, host):
+            return "private-dns"
+        return ""
+
+    @staticmethod
+    def _host_resolves_public(host: str) -> bool:
+        """域名解析出来的所有地址都必须是公网地址（防 DNS 指向内网）。"""
         try:
-            session = await self._get_session()
-            async with session.get(url, timeout=timeout) as response:
-                if response.status != 200:
-                    self.ctx.logger.warning("音频下载失败：HTTP %s", response.status)
-                    return b""
-                chunks: List[bytes] = []
-                total = 0
-                async for chunk in response.content.iter_chunked(65536):
-                    total += len(chunk)
-                    if total > limit:
-                        self.ctx.logger.warning(
-                            "音频超过 %.1f MB 上限（%s），未暂存",
-                            float(config.max_file_mb),
-                            _song_media.readable_size(total),
-                        )
-                        return b""
-                    chunks.append(chunk)
-            return b"".join(chunks)
-        except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as exc:
-            self.ctx.logger.warning("音频下载失败（%s）", exc)
-            return b""
+            infos = socket.getaddrinfo(host, None)
+        except OSError:
+            return False
+        addresses = {str(info[4][0]) for info in infos if info[4]}
+        if not addresses:
+            return False
+        return all(not _config._is_private_host(address) for address in addresses)
 
     async def _stash_song_media(
         self,
@@ -2089,13 +2137,32 @@ class MiMoVoicePlugin(MaiBotPlugin):
         return None
 
     async def _sing_list(self, stream_id: str, songs: List[Any]) -> None:
+        header = f"曲库共 {len(songs)} 首（上限 {int(self.config.songs.max_songs)}）"
         lines = _songs.render_library(songs)
+        if songs and await self._send_forward_list(stream_id, header, lines):
+            return
+        # 回退：单条文本清单（适配器不支持合并转发时走这里）
         limit = 60
         body = lines[:limit]
         if len(lines) > limit:
             body.append(f"……还有 {len(lines) - limit} 首")
-        header = f"曲库共 {len(songs)} 首（上限 {int(self.config.songs.max_songs)}）："
-        await self._command_reply(stream_id, "\n".join([header, *body]))
+        await self._command_reply(stream_id, "\n".join([header + "：", *body]))
+
+    async def _send_forward_list(self, stream_id: str, header: str, lines: List[str]) -> bool:
+        """把清单发成合并转发（一张卡片）；每 15 首一个节点，避免单节点过长。"""
+        nodes: List[Dict[str, Any]] = [_forward_node(header)]
+        for index in range(0, len(lines), _SING_LIST_NODE_LINES):
+            chunk = lines[index : index + _SING_LIST_NODE_LINES]
+            nodes.append(_forward_node("\n".join(chunk)))
+        try:
+            await self.ctx.send.hybrid(
+                segments=[{"type": "forward", "data": nodes}],
+                stream_id=stream_id,
+            )
+            return True
+        except Exception as exc:
+            self.ctx.logger.warning("曲库清单转发失败（%s），回退文本", exc)
+            return False
 
     def _sing_cooldown(self, stream_id: str, user_id: str) -> str:
         """点歌冷却：先判会话，再判个人；通过时顺手记时间。"""

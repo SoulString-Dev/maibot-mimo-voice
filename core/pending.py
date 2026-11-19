@@ -181,10 +181,10 @@ class PendingPool:
         window_seconds: float,
         now: Optional[float] = None,
     ) -> Optional[PendingItem]:
-        """在窗口内找本会话最近的一条；同发送者的优先，其次才跨人认领。
+        """在窗口内找**本会话**最近的一条。
 
-        ``add`` 现在只允许私聊，但音频可能是刚在群里发的，所以本会话没有候选时，
-        再按「同一个人」跨会话找一次——陌生人的文件永远不会被认领。
+        跨会话不认领（写死）：同一个人先发到群里、再去私聊 ``add`` 不行，必须在这个会话里
+        把音频再发一次。这样「配置/入库只发生在私聊」这条边界在代码层面成立，而不是靠提示。
         """
         stamp = time.time() if now is None else float(now)
         window = max(0.0, float(window_seconds))
@@ -200,8 +200,6 @@ class PendingPool:
 
         items = [item for item in self._load() if usable(item)]
         candidates = [item for item in items if item.session_id == wanted_session]
-        if not candidates and wanted_user:
-            candidates = [item for item in items if item.user_id == wanted_user]
         if not candidates:
             return None
         candidates.sort(key=lambda item: item.created_at, reverse=True)

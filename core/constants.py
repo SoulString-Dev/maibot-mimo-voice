@@ -115,6 +115,12 @@ _INTENT_ARMED_TTL_SECONDS = 120.0
 # 唱歌点播的后台维护：多久扫一次暂存池/回收站，回收站里的文件保留多久
 _SONG_HOUSEKEEPING_SECONDS = 600.0
 _SONG_TRASH_TTL_SECONDS = 7 * 86400.0
+
+# 音频下载最多跟随几次跳转（每一跳都重新校验主机，见 plugin._media_url_problem）
+_MAX_REDIRECT_HOPS = 3
+
+# /voice sing list 的合并转发：每个节点放几首（一行一首）
+_SING_LIST_NODE_LINES = 15
 # 宿主配置里能读到 bot 昵称时的候选路径（容器内 / 本地开发）
 _MAIBOT_CONFIG_PATHS = ("/MaiMBot/config/bot_config.toml", "config/bot_config.toml")
 

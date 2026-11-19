@@ -55,6 +55,10 @@ def voice_payload(audio: bytes, *, session_id: str = "s1", group_id: str = "123"
     }
 
 
+def voice_segments(plugin) -> list:
+    return [seg for _sid, segs in plugin.ctx.send.hybrids for seg in segs if seg.get("type") == "voice"]
+
+
 def collect(plugin, payload: dict) -> None:
     asyncio.run(plugin.collect_song_media(message=payload))
 
@@ -68,8 +72,8 @@ def command(plugin, text: str, *, user_id: str = "456", group_id: str = "123", s
     return plugin.ctx.send.texts[-1][1] if plugin.ctx.send.texts else ""
 
 
-def private(plugin, text: str, *, user_id: str = "456", stream_id: str = "p1") -> str:
-    """私聊里的命令；入库 / 删除 / 改名只有私聊能用，音频可能是刚在群里发的。"""
+def private(plugin, text: str, *, user_id: str = "456", stream_id: str = "s1") -> str:
+    """私聊里的命令；入库 / 删除 / 改名只有私聊能用，音频必须在这个会话里发过。"""
     return command(plugin, text, user_id=user_id, group_id="", stream_id=stream_id)
 
 
@@ -112,13 +116,19 @@ with temp_dir() as root:
     checker.check("音频落在 songs/", (Path(root) / "songs" / songs[0].file).exists())
     checker.equal("认领后暂存清空", len(pending_mod.PendingPool(Path(root) / "pending").items()), 0)
 
-    reply = command(plugin, "/voice sing list")
-    checker.check("列表包含歌名", "雨爱" in reply and "1 首" in reply, reply)
+    texts_before_list = len(plugin.ctx.send.texts)
+    command(plugin, "/voice sing list")
+    forward = plugin.ctx.send.hybrids[-1][1]
+    checker.equal("清单走合并转发", forward[0]["type"], "forward")
+    nodes = forward[0]["data"]
+    joined = "\n".join(node["content"][0]["data"] for node in nodes)
+    checker.check("转发里有歌名与总数", "雨爱" in joined and "1 首" in joined, joined)
+    checker.equal("清单不额外发文字", len(plugin.ctx.send.texts), texts_before_list)
 
     reply = command(plugin, "/voice sing 雨爱")
     checker.equal("点歌不回执错误", plugin.ctx.send.texts[-1][1] if reply else "", reply)
-    checker.equal("发出 1 条语音", len(plugin.ctx.send.hybrids), 1)
-    segment = plugin.ctx.send.hybrids[-1][1][0]
+    checker.equal("发出 1 条语音", len(voice_segments(plugin)), 1)
+    segment = voice_segments(plugin)[-1]
     checker.equal("段类型", segment["type"], "voice")
     audio = base64.b64decode(segment["binary_data_base64"])
     checker.check("发的是入库的 wav", audio[:4] == b"RIFF")
@@ -137,13 +147,13 @@ with temp_dir() as root:
     plugin.__dict__["_sing_group_last"].clear()
     plugin.__dict__["_sing_user_last"].clear()
     command(plugin, "/voice sing 下雨")
-    checker.equal("按别名点歌", len(plugin.ctx.send.hybrids), 2)
+    checker.equal("按别名点歌", len(voice_segments(plugin)), 2)
 
     plugin.__dict__["_sing_group_last"].clear()
     plugin.__dict__["_sing_user_last"].clear()
     reply = private(plugin, "/voice sing set 雨爱 tags 杨丞琳,伤感情歌")
     command(plugin, "/voice sing 杨丞琳")
-    checker.equal("按标签点歌", len(plugin.ctx.send.hybrids), 3)
+    checker.equal("按标签点歌", len(voice_segments(plugin)), 3)
 
     # 删除只认歌名
     reply = private(plugin, "/voice sing del 下雨")
@@ -330,7 +340,7 @@ with temp_dir() as root:
             return {"url": "http://1.2.3.4:80/a.mp3"}
         return None
 
-    async def fake_download(url: str) -> bytes:
+    async def fake_download(url: str, *, text_source: bool = False) -> bytes:
         return wav_bytes(1.0)
 
     plugin._call_adapter_api = fake_call
@@ -348,6 +358,15 @@ with temp_dir() as root:
     checker.equal("入库后暂存清空", len(pending_mod.PendingPool(Path(root) / "pending").items()), 0)
     collect(plugin, voice_payload(wav_bytes(1.5)))  # 同一条消息的第二次钩子
     checker.equal("认领过的音频不再暂存", len(pending_mod.PendingPool(Path(root) / "pending").items()), 0)
+
+# ---------------------------------------------------------------- 跨会话不认领（写死）
+with temp_dir() as root:
+    plugin, config, _logger = make(Path(root))
+    collect(plugin, voice_payload(wav_bytes(1.5), session_id="s1"))  # 群里发的
+    reply = private(plugin, "/voice sing add 雨爱", stream_id="p2")  # 去私聊入库
+    checker.check("跨会话认领被拒", "没收到音频" in reply, reply)
+    songs_path = Path(root) / "songs" / "songs.json"
+    checker.check("跨会话没入库", not songs_path.exists())
 
 # ---------------------------------------------------------------- P0-A 去重键带 message_id
 with temp_dir() as root:
@@ -430,5 +449,45 @@ with temp_dir() as root:
     index.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
     asyncio.run(plugin._song_housekeeping_once())
     checker.equal("维护任务清掉过期暂存", len(pending_mod.PendingPool(Path(root) / "pending").items()), 0)
+
+# ---------------------------------------------------------------- 清单转发失败回退文本
+with temp_dir() as root:
+    plugin, config, _logger = make(Path(root))
+    collect(plugin, voice_payload(wav_bytes(1.5)))
+    private(plugin, "/voice sing add 雨爱")
+
+    async def boom(segments, stream_id, **kwargs):
+        raise RuntimeError("适配器不支持合并转发")
+
+    plugin.ctx.send.hybrid = boom
+    before = len(plugin.ctx.send.texts)
+    command(plugin, "/voice sing list")
+    checker.equal("转发失败补一条文字", len(plugin.ctx.send.texts), before + 1)
+    checker.check("回退清单含歌名", "雨爱" in plugin.ctx.send.texts[-1][1], plugin.ctx.send.texts[-1][1])
+
+# ---------------------------------------------------------------- 下载链接校验
+with temp_dir() as root:
+    plugin, config, _logger = make(Path(root))
+    checker.equal(
+        "公网 IP 链接通过",
+        asyncio.run(plugin._media_url_problem("http://1.2.3.4:80/a.mp3", text_source=False)),
+        "",
+    )
+    checker.equal(
+        "内网 IP 链接拒绝",
+        asyncio.run(plugin._media_url_problem("http://10.0.0.1/a.mp3", text_source=False)),
+        "private-host",
+    )
+    checker.equal(
+        "非 QQ 文本链接拒绝",
+        asyncio.run(plugin._media_url_problem("http://1.2.3.4:80/other/a.mp3", text_source=True)),
+        "text-url",
+    )
+    plugin._host_resolves_public = staticmethod(lambda host: False)
+    checker.equal(
+        "域名解析到内网拒绝",
+        asyncio.run(plugin._media_url_problem("http://example.com/a.mp3", text_source=False)),
+        "private-dns",
+    )
 
 sys.exit(checker.report())
