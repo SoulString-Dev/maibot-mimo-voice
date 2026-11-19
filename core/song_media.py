@@ -11,10 +11,12 @@
 from __future__ import annotations
 
 import io
+import ipaddress
 import re
 import wave
 from pathlib import Path
 from typing import List, Optional, Tuple
+from urllib.parse import urlsplit
 
 from .audio import _numpy, _read_wav_pcm, _write_wav_pcm
 
@@ -272,3 +274,30 @@ __all__: List[str] = [
     "probe_duration",
     "readable_size",
 ]
+
+
+_QQ_MEDIA_HOSTS = (".qq.com", ".qpic.cn", ".qqmail.com")
+_QQ_MEDIA_EXACT = ("qq.com", "qpic.cn", "multimedia.nt.qq.com.cn")
+
+
+def is_qq_media_url(url: str) -> bool:
+    """判断链接是否出自 QQ 自己的文件/CDN 域名。
+
+    文本里出现的下载链接不可信（任何群成员都能照着 ``[文件] x.mp3，链接: http://…`` 的格式
+    构造一条），所以文本来源的链接只允许 QQ 域名；通过适配器 API 拿到的链接不走这条限制。
+    """
+    try:
+        parts = urlsplit(str(url or ""))
+    except ValueError:
+        return False
+    host = (parts.hostname or "").lower().strip(".")
+    if not host:
+        return False
+    if host in _QQ_MEDIA_EXACT or any(host.endswith(suffix) for suffix in _QQ_MEDIA_HOSTS):
+        return True
+    # 实测 QQ 文件 CDN 是 http://<公网 IP>:80/qqdownloadftnv5?...，路径前缀固定
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return (parts.path or "").lower().startswith("/qqdownload")

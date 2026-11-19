@@ -239,6 +239,9 @@ max_songs = 50
 max_duration_seconds = 300.0
 # 单文件大小上限（MB，0.1–200）。
 max_file_mb = 20.0
+# 曲库总容量上限（MB，10–10000）：已用空间 + 新文件超了就拒绝入库，提示先删几首。
+# 只拦新增；/voice sing addforce 替换同名歌不额外占空间。
+max_total_mb = 500.0
 # 降采样（默认开）：入库的 wav 转成单声道 16 kHz 省 3/4 空间；mp3/flac 不动。
 downsample = true
 downsample_rate = 16000

@@ -461,6 +461,12 @@ class SongsConfig(PluginConfigBase):
         description="单曲时长上限（秒），默认 5 分钟；实测语音条直发 139.78 秒无碍，不拆分",
     )
     max_file_mb: float = Field(default=20.0, ge=0.1, le=200.0, description="单个音频文件大小上限（MB）")
+    max_total_mb: float = Field(
+        default=500.0,
+        ge=10.0,
+        le=10000.0,
+        description="曲库总容量上限（MB）：已用容量 + 新文件超过就拒绝入库，提示先删几首",
+    )
     downsample: bool = Field(
         default=True,
         description="入站 wav 降采样后再入库（mp3/flac 解不了码，保持原样）；16000 Hz 单声道省 3/4 空间",

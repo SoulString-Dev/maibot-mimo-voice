@@ -111,6 +111,10 @@ _SONG_CUE_TTL_SECONDS = 180.0
 _INTENT_MIN_INTERVAL_SECONDS = 30.0
 # 命中意图后播放工具的可见窗口（秒）
 _INTENT_ARMED_TTL_SECONDS = 120.0
+
+# 唱歌点播的后台维护：多久扫一次暂存池/回收站，回收站里的文件保留多久
+_SONG_HOUSEKEEPING_SECONDS = 600.0
+_SONG_TRASH_TTL_SECONDS = 7 * 86400.0
 # 宿主配置里能读到 bot 昵称时的候选路径（容器内 / 本地开发）
 _MAIBOT_CONFIG_PATHS = ("/MaiMBot/config/bot_config.toml", "config/bot_config.toml")
 

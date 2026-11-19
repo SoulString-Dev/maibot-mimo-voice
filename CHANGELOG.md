@@ -3,7 +3,7 @@
 本文件是版本变更的**唯一事实源**：发版时先改这里，再把对应段落拷进 GitHub Release 说明。
 README 只保留最新一版的要点。
 
-## [0.7.0] - 2026-11-19
+## [0.7.0] - 2026-11-20
 
 ### 新增
 
@@ -13,9 +13,17 @@ README 只保留最新一版的要点。
 - **意图层（不用打命令也能点歌）**：群里被 @ 或点名后说「唱一首雨爱」，插件把曲库候选注入本轮 planner 请求（`maisaka.planner.before_request`），模型判断要播就调用 `mimo_voice_play_song` 工具，语音条由插件直接发出。触发是正则（`songs.intent_patterns`，配置页一行一条，写错的跳过并告警），默认 `(?:唱|来|放|点)一?(?:首|个)`；`require_mention` 默认开（群里必须 @ 或点名，私聊不要求；点名按 `bot.nickname` / `alias_names` + `intent_names` 自己判，因为宿主的 `is_mentioned` 要等 `register_message` 才补）；同会话 30 秒内最多注入一次；上一轮注入的提示会在下次 planner 请求前清掉；播放工具只在该轮命中意图时暴露（曲库为空或没命中都隐藏）。
 - **文件消息补链接**：QQ 私聊文件段只有 `file_id`、没有 url，插件用 `api.call` 调适配器公开的 `message.get_*_msg_history` + `file.get_*_file_url` 自己补下载地址（`songs.lookup_file_url`，默认开）；不需要改适配器。QQ 文件 CDN 只给 http，下载器因此允许 http，但内网/本机地址仍拒绝。
 
+### 加固
+
+- **重复投递判定带消息号**：同一份音频被入站钩子跑两遍（防抖插件合并后重投递）仍会挡下，但 10 分钟内真的再发一次同一首时不会再被误挡，`/voice sing addforce` 可以正常覆盖。
+- **文本里的下载链接只认 QQ 域名**：任何人照着 `[文件] x.mp3，链接: http://…` 的格式伪造一条消息，以前会让插件去下载任意公网地址；现在文本来源的链接只接受 `*.qq.com` / `*.qpic.cn` / IP 主机且路径以 `/qqdownload` 开头，适配器 API 补出来的链接不受影响。
+- **曲库总容量上限**：新增 `songs.max_total_mb`（默认 500 MB），已用空间 + 新文件超限就拒绝入库并提示先删；`addforce` 原地替换不额外占空间。
+- **曲库读写加锁**：`songs.json` 的「读 → 改 → 写」串行化，两个管理员同时 `add` / `set` 不会互相覆盖。
+- **后台维护**：每 10 分钟清一次过期的暂存音频；`songs/.trash/` 里超过 7 天的文件自动删除（以前只进不出）。
+
 ### 修改
 
-- `plugin.config_version` 升到 0.7.0；`config.example.toml` 新增 `[songs]` 段 17 项。
+- `plugin.config_version` 升到 0.7.0；`config.example.toml` 新增 `[songs]` 段 18 项。
 - `/voice` 命令的「仅私聊」规则放开一个例外：`/voice sing` 在群聊里也能用；其余子命令仍是仅私聊、仅管理员。
 - 新增纯标准库音频探测（`core/song_media.py`）：mp3 逐帧算时长、flac 读 STREAMINFO、wav 用 `wave`，**不依赖 ffmpeg**。
 

@@ -349,4 +349,86 @@ with temp_dir() as root:
     collect(plugin, voice_payload(wav_bytes(1.5)))  # 同一条消息的第二次钩子
     checker.equal("认领过的音频不再暂存", len(pending_mod.PendingPool(Path(root) / "pending").items()), 0)
 
+# ---------------------------------------------------------------- P0-A 去重键带 message_id
+with temp_dir() as root:
+    plugin, config, _logger = make(Path(root))
+    collect(plugin, voice_payload(wav_bytes(1.5)))  # message_id=m1
+    private(plugin, "/voice sing add 雨爱")
+    collect(plugin, voice_payload(wav_bytes(1.5)))  # 同一条消息的重复投递，仍挡
+    checker.equal("同一条消息重复投递不再暂存", len(pending_mod.PendingPool(Path(root) / "pending").items()), 0)
+
+    resent = voice_payload(wav_bytes(1.5))
+    resent["message_id"] = "m2"  # 10 分钟内真的又发了一次同一首
+    collect(plugin, resent)
+    checker.equal("不同消息的同一首可以重新暂存", len(pending_mod.PendingPool(Path(root) / "pending").items()), 1)
+    reply = private(plugin, "/voice sing addforce 雨爱")
+    checker.check("重发后 addforce 成功", "已替换" in reply, reply)
+
+# ---------------------------------------------------------------- P0-B 文本链接只认 QQ 域名
+with temp_dir() as root:
+    plugin, config, _logger = make(Path(root))
+    media = sys.modules[f"{module.__name__}.core.song_media"]
+    checker.check("QQ CDN 域名放行", media.is_qq_media_url("https://multimedia.nt.qq.com.cn/x/a.mp3"))
+    checker.check("QQ 文件 CDN 放行", media.is_qq_media_url("http://113.240.75.246:80/qqdownloadftnv5?fileid=1"))
+    checker.check("普通公网域名拒绝", not media.is_qq_media_url("https://evil.example.com/a.mp3"))
+    checker.check("非 /qqdownload 的 IP 链接拒绝", not media.is_qq_media_url("http://113.240.75.246:80/other/a.mp3"))
+
+    collect(
+        plugin,
+        {
+            "session_id": "s1",
+            "scope": "group",
+            "raw_message": [{"type": "text", "data": "[文件] a.mp3，大小: 1 KB，链接: https://evil.example.com/a.mp3"}],
+            "message_info": {"group_info": {"group_id": "123"}},
+        },
+    )
+    checker.equal("伪造的非 QQ 链接不暂存", len(pending_mod.PendingPool(Path(root) / "pending").items()), 0)
+
+# ---------------------------------------------------------------- P1-A 曲库总量上限
+with temp_dir() as root:
+    plugin, config, _logger = make(Path(root), max_total_mb=10.0)
+    songs_root = Path(root) / "songs"
+    songs_root.mkdir(parents=True, exist_ok=True)
+    (songs_root / "placeholder.mp3").write_bytes(b"\0" * (10 * 1024 * 1024 + 1024))
+    collect(plugin, voice_payload(wav_bytes(1.5)))
+    reply = private(plugin, "/voice sing add 雨爱")
+    checker.check("曲库满了拒绝入库", "曲库已占" in reply, reply)
+    checker.check("拒绝后曲库为空", not (songs_root / "songs.json").exists())
+
+# ---------------------------------------------------------------- P1-B 曲库锁
+with temp_dir() as root:
+    plugin, config, _logger = make(Path(root))
+    checker.check("曲库锁已创建", isinstance(plugin._songs_lock, asyncio.Lock))
+
+# ---------------------------------------------------------------- P1-C 后台维护
+with temp_dir() as root:
+    plugin, config, _logger = make(Path(root))
+    songs_root = Path(root) / "songs"
+    trash = songs_root / ".trash"
+    trash.mkdir(parents=True, exist_ok=True)
+    old = trash / "old.mp3"
+    old.write_bytes(b"x")
+    stamp = time.time() - 8 * 86400
+    import os
+
+    os.utime(old, (stamp, stamp))
+    fresh = trash / "fresh.mp3"
+    fresh.write_bytes(b"x")
+    removed = plugin._purge_trash(songs_root)
+    checker.equal("回收站删掉 1 个旧文件", removed, 1)
+    checker.check("旧文件已删", not old.exists())
+    checker.check("新文件保留", fresh.exists())
+
+    checker.equal(
+        "曲库占用只算音频", plugin._songs_total_bytes(songs_root), 0
+    )  # 只有 .trash 里的文件
+
+    collect(plugin, voice_payload(wav_bytes(1.5)))
+    index = Path(root) / "pending" / "index.json"
+    data = json.loads(index.read_text(encoding="utf-8"))
+    data["items"][0]["created_at"] = time.time() - 7200
+    index.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    asyncio.run(plugin._song_housekeeping_once())
+    checker.equal("维护任务清掉过期暂存", len(pending_mod.PendingPool(Path(root) / "pending").items()), 0)
+
 sys.exit(checker.report())

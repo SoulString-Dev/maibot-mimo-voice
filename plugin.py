@@ -100,6 +100,8 @@ from .core.constants import (
     _SILENCE_DBFS,
     _SOFT_LIMIT_CEILING,
     _SONG_CUE_TTL_SECONDS,
+    _SONG_HOUSEKEEPING_SECONDS,
+    _SONG_TRASH_TTL_SECONDS,
     _TAIL_KEEP_SECONDS,
     _TIMBRE_FULL_STRENGTH_DB,
     _TIMBRE_MAX_GAIN_DB,
@@ -114,7 +116,7 @@ from .core.constants import (
     SUPPORTED_REFERENCE_SUFFIXES,
     VOICE_SEGMENT_TYPE,
 )
-from .core.pending import PendingPool
+from .core.pending import PendingItem, PendingPool
 
 
 class _RetryableSynthesisError(RuntimeError):
@@ -205,6 +207,9 @@ class MiMoVoicePlugin(MaiBotPlugin):
         self._song_tool_stamp: Optional[Tuple[int, int]] = None
         # 只在真的命中意图的那一轮把播放工具暴露给模型：session -> 过期时间
         self._intent_armed: Dict[str, float] = {}
+        # 曲库读改写要串行（两个管理员同时 add/set 会互相覆盖）；后台维护任务负责清暂存池与 .trash
+        self._songs_lock = asyncio.Lock()
+        self._housekeeping_task: Optional[asyncio.Task] = None
         # 「点名」识别的称呼集合（bot 昵称 + alias_names + 配置里的 intent_names）
         self._mention_names: List[str] = []
 
@@ -283,6 +288,8 @@ class MiMoVoicePlugin(MaiBotPlugin):
                 base_host,
             )
         self._start_scheduler()
+        if self._songs_enabled() and self._housekeeping_task is None:
+            self._housekeeping_task = asyncio.create_task(self._song_housekeeping_loop())
 
     def _flush_config_warnings(self) -> None:
         """把本轮配置校验攒下的告警按类别去重后打一次就清空。
@@ -306,6 +313,9 @@ class MiMoVoicePlugin(MaiBotPlugin):
             self.ctx.logger.warning("另有 %d 类配置告警未展开，详见 config.toml 与插件文档", hidden)
 
     async def on_unload(self) -> None:
+        if self._housekeeping_task is not None:
+            self._housekeeping_task.cancel()
+            self._housekeeping_task = None
         await self._stop_scheduler()
         for task in list(self._pending_text_tasks):
             task.cancel()
@@ -1322,6 +1332,72 @@ class MiMoVoicePlugin(MaiBotPlugin):
         data_dir = self._data_dir()
         return data_dir / "pending" if data_dir is not None else None
 
+    async def _song_housekeeping_loop(self) -> None:
+        """每 10 分钟清一次暂存池过期条目和回收站里的旧文件。
+
+        ``PendingPool.prune`` 只在 put 时跑；整晚没人发音频的话过期文件会一直躺着。
+        """
+        try:
+            while True:
+                await asyncio.sleep(_SONG_HOUSEKEEPING_SECONDS)
+                if not self._songs_enabled():
+                    continue
+                await self._song_housekeeping_once()
+        except asyncio.CancelledError:
+            raise
+
+    async def _song_housekeeping_once(self) -> None:
+        config = self.config.songs
+        pool = self._pending_pool()
+        if pool is not None:
+            removed = await asyncio.to_thread(
+                pool.prune,
+                ttl_seconds=float(config.pending_ttl_seconds),
+                max_bytes=int(float(config.pending_max_mb) * 1024 * 1024),
+                max_entries=int(config.pending_max_entries),
+            )
+            if removed:
+                self.ctx.logger.info("暂存池清理：移除 %d 条过期/超量音频", removed)
+        root = self._songs_root()
+        if root is not None:
+            purged = await asyncio.to_thread(self._purge_trash, root)
+            if purged:
+                self.ctx.logger.info("回收站清理：删除 %d 个超过 7 天的文件", purged)
+
+    @staticmethod
+    def _purge_trash(root: Path, *, ttl_seconds: float = _SONG_TRASH_TTL_SECONDS) -> int:
+        trash = root / ".trash"
+        if not trash.is_dir():
+            return 0
+        cutoff = time.time() - max(0.0, ttl_seconds)
+        removed = 0
+        for item in trash.iterdir():
+            try:
+                if item.is_file() and item.stat().st_mtime < cutoff:
+                    item.unlink()
+                    removed += 1
+            except OSError:
+                continue
+        return removed
+
+    @staticmethod
+    def _songs_total_bytes(root: Path) -> int:
+        """曲库已占用字节数（不含元数据与回收站）。"""
+        total = 0
+        try:
+            entries = list(root.iterdir())
+        except OSError:
+            return 0
+        for entry in entries:
+            if entry.name == "songs.json" or entry.name == ".trash":
+                continue
+            try:
+                if entry.is_file():
+                    total += entry.stat().st_size
+            except OSError:
+                continue
+        return total
+
     def _pending_pool(self) -> Optional[PendingPool]:
         root = self._pending_root()
         if root is None:
@@ -1667,11 +1743,12 @@ class MiMoVoicePlugin(MaiBotPlugin):
                 continue
             text = str(segment.get("data") or "")
             url = _song_media.extract_file_url(text)
+            from_text = bool(url)
             if not url:
                 url = await self._resolve_file_url(text, group_id=group_id, user_id=user_id)
             if not url:
                 continue
-            data = await self._download_media(url)
+            data = await self._download_media(url, text_source=from_text)
             if data:
                 found.append((data, _song_media.guess_extension(url) or ".mp3", "file"))
         return found
@@ -1788,7 +1865,7 @@ class MiMoVoicePlugin(MaiBotPlugin):
         except (ValueError, TypeError):
             return b""
 
-    async def _download_media(self, url: str) -> bytes:
+    async def _download_media(self, url: str, *, text_source: bool = False) -> bytes:
         """从 QQ 文件链接下载音频；只认 http(s) + 公网主机，大小按配置截断。
 
         QQ 文件的 CDN 地址目前只有 ``http://<公网 IP>:80/qqdownloadftnv5?...``（2026-11-19 实测），
@@ -1803,6 +1880,10 @@ class MiMoVoicePlugin(MaiBotPlugin):
         host = urlsplit(url).hostname or ""
         if not host or _config._is_private_host(host):
             self._warn_once("songs:host", "拒绝下载内网/本机地址（%s），已跳过", host or "?")
+            return b""
+        if text_source and not _song_media.is_qq_media_url(url):
+            # 文本里的链接任何人都能照着 [文件] x.mp3，链接: http://… 的格式伪造
+            self._warn_once("songs:text-url", "文本里的下载链接不是 QQ 域名（%s），已跳过", host)
             return b""
         timeout = aiohttp.ClientTimeout(total=float(config.download_timeout_seconds))
         try:
@@ -1857,11 +1938,13 @@ class MiMoVoicePlugin(MaiBotPlugin):
             if lowered:
                 payload = lowered
         digest = hashlib.sha256(payload).hexdigest()
-        consumed_at = self._consumed_media.get(digest)
+        # 去重键带 message_id：同一条消息被钩子跑两遍要挡；10 分钟内真·重发同一首则放行
+        consumed_key = f"{message_id}|{digest}" if message_id else digest
+        consumed_at = self._consumed_media.get(consumed_key)
         if consumed_at is not None:
             if time.monotonic() - consumed_at < 600.0:
                 return
-            self._consumed_media.pop(digest, None)
+            self._consumed_media.pop(consumed_key, None)
         duration = await asyncio.to_thread(_song_media.probe_duration, payload, ext)
         if duration > float(config.max_duration_seconds) + 1.0:
             self.ctx.logger.info(
@@ -2088,11 +2171,25 @@ class MiMoVoicePlugin(MaiBotPlugin):
         user_id: str,
         group_id: str = "",
     ) -> None:
-        config = self.config.songs
         clean = (name or "").strip()
         if not clean:
             await self._command_reply(stream_id, "要一个歌名：/voice sing add <歌名>")
             return
+        async with self._songs_lock:
+            await self._sing_add_locked(stream_id, clean, force=force, user_id=user_id, group_id=group_id)
+
+    async def _sing_add_locked(
+        self,
+        stream_id: str,
+        clean: str,
+        *,
+        force: bool,
+        user_id: str,
+        group_id: str,
+    ) -> None:
+        config = self.config.songs
+        # 拿到锁后重新读盘：并发场景下调用方传进来的是加锁前的快照
+        songs = self._load_songs()
         pool = self._pending_pool()
         if pool is None:
             await self._command_reply(stream_id, "找不到插件数据目录，无法入库。")
@@ -2130,12 +2227,6 @@ class MiMoVoicePlugin(MaiBotPlugin):
             return
         ext = item.ext or ".wav"
         file_name = f"{item.sha256[:16]}{ext}"
-        try:
-            await asyncio.to_thread(root.mkdir, parents=True, exist_ok=True)
-            await asyncio.to_thread((root / file_name).write_bytes, audio)
-        except OSError as exc:
-            await self._command_reply(stream_id, f"写入曲库失败：{exc}")
-            return
         duration = item.duration_s or float(await asyncio.to_thread(_song_media.probe_duration, audio, ext))
         if duration > float(config.max_duration_seconds) + 1.0:
             await self._command_reply(
@@ -2144,6 +2235,23 @@ class MiMoVoicePlugin(MaiBotPlugin):
             )
             return
         previous = _songs.find_conflict(songs, [clean])
+        if previous is None:
+            # 容量上限只拦「新增」；同名替换是原地换文件，不再额外占空间
+            used = await asyncio.to_thread(self._songs_total_bytes, root)
+            cap = int(float(config.max_total_mb) * 1024 * 1024)
+            if used + len(audio) > cap:
+                await self._command_reply(
+                    stream_id,
+                    f"曲库已占 {_song_media.readable_size(used)} / "
+                    f"{_song_media.readable_size(cap)}，先 /voice sing del <歌名> 删几首再入库。",
+                )
+                return
+        try:
+            await asyncio.to_thread(root.mkdir, parents=True, exist_ok=True)
+            await asyncio.to_thread((root / file_name).write_bytes, audio)
+        except OSError as exc:
+            await self._command_reply(stream_id, f"写入曲库失败：{exc}")
+            return
         song, error = _songs.add_song(
             songs,
             clean,
@@ -2155,6 +2263,7 @@ class MiMoVoicePlugin(MaiBotPlugin):
             force=force,
         )
         if song is None or error:
+            await asyncio.to_thread(self._quiet_unlink, root / file_name)
             await self._command_reply(stream_id, error or "入库失败。")
             return
         try:
@@ -2165,9 +2274,7 @@ class MiMoVoicePlugin(MaiBotPlugin):
         if previous is not None and previous.file and previous.file != file_name:
             await asyncio.to_thread(self._quiet_unlink, root / previous.file)
         await asyncio.to_thread(pool.discard, item)
-        self._consumed_media[item.sha256] = time.monotonic()
-        if len(self._consumed_media) > 200:
-            self._consumed_media.clear()
+        self._remember_consumed(item)
         verb = "已替换" if previous is not None else "已入库"
         await self._command_reply(
             stream_id,
@@ -2177,6 +2284,11 @@ class MiMoVoicePlugin(MaiBotPlugin):
         self.ctx.logger.info("曲库新增：%s（%s，%s）", song.name, file_name, _song_media.readable_size(len(audio)))
 
     async def _sing_delete(self, stream_id: str, songs: List[Any], name: str) -> None:
+        async with self._songs_lock:
+            songs = self._load_songs()
+            await self._sing_delete_locked(stream_id, songs, name)
+
+    async def _sing_delete_locked(self, stream_id: str, songs: List[Any], name: str) -> None:
         song, error = _songs.delete_song(songs, name)
         if song is None or error:
             await self._command_reply(stream_id, error or "删除失败。")
@@ -2198,6 +2310,13 @@ class MiMoVoicePlugin(MaiBotPlugin):
         self.ctx.logger.info("曲库删除：%s", song.name)
 
     async def _sing_set(self, stream_id: str, songs: List[Any], name: str, field_name: str, value: str) -> None:
+        async with self._songs_lock:
+            songs = self._load_songs()
+            await self._sing_set_locked(stream_id, songs, name, field_name, value)
+
+    async def _sing_set_locked(
+        self, stream_id: str, songs: List[Any], name: str, field_name: str, value: str
+    ) -> None:
         song, error = _songs.set_song_field(songs, name, field_name, value)
         if song is None or error:
             await self._command_reply(stream_id, error or "修改失败。")
@@ -2208,6 +2327,13 @@ class MiMoVoicePlugin(MaiBotPlugin):
             await self._command_reply(stream_id, f"保存曲库失败：{exc}")
             return
         await self._command_reply(stream_id, f"已更新「{song.name}」的 {field_name}。")
+
+    def _remember_consumed(self, item: PendingItem) -> None:
+        """记下「这条消息的这份音频已经被入库」，挡掉钩子的重复投递。"""
+        key = f"{item.message_id}|{item.sha256}" if item.message_id else item.sha256
+        self._consumed_media[key] = time.monotonic()
+        if len(self._consumed_media) > 200:
+            self._consumed_media.clear()
 
     @staticmethod
     def _quiet_unlink(path: Path) -> None:
