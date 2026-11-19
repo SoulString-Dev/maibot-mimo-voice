@@ -13,8 +13,13 @@ from typing import Any, List, Optional, Sequence, Tuple
 # 「唱首」「来一个」「放一首」都命中；配置页整行替换即可换成任意正则。
 DEFAULT_PATTERNS: Tuple[str, ...] = ("(?:唱|来|放|点)一?(?:首|个)",)
 
+# 注入提示的固定前缀：下一轮 planner 请求时按它把上一轮留下的提示清掉
+HINT_MARK = "【点歌提示】"
+
 # 歌名两侧常带的空白、标点、引号与书名号
 _NOISE = " \t\r\n\u3000，,。.、!！?？~～:：;；\"'“”‘’《》<>()（）[]{}【】"
+# 句尾语气词：「唱一首雨爱嘛」不该把「嘛」带进歌名
+_TAIL_PARTICLES = "嘛吧呢啊呀哦啦咯喔哩呐"
 # 开头的 @昵称（含 CQ 码风格与全角空格分隔）
 _MENTION_PREFIX = re.compile(r"^(?:\s*@[^\s@]+|\s*\[@[^\]]+\])+")
 _MAX_KEYWORD = 40
@@ -69,6 +74,8 @@ def strip_mentions(text: str) -> str:
 
 def _clean_keyword(text: str) -> str:
     keyword = text.strip(_NOISE)
+    while len(keyword) > 1 and keyword[-1] in _TAIL_PARTICLES:
+        keyword = keyword[:-1].strip(_NOISE)
     if len(keyword) > _MAX_KEYWORD:
         keyword = keyword[:_MAX_KEYWORD]
     return keyword
@@ -100,7 +107,7 @@ def match_intent(text: str, patterns: Sequence[re.Pattern[str]]) -> Optional[Int
 def build_hint(candidates: Sequence[str], keyword: str, limit: int = 5) -> str:
     """拼一段注入给模型的提示：候选清单 + 该调用哪个工具。"""
     size = max(1, min(int(limit), len(candidates) or 1))
-    head = "【点歌提示】用户这句话像是在点歌"
+    head = HINT_MARK + "用户这句话像是在点歌"
     head += f"（想要的可能是「{keyword}」）。" if keyword else "。"
     lines = [head, "曲库里现有这些："]
     for index, label in enumerate(candidates[:size], 1):
@@ -147,3 +154,39 @@ def append_hint(items: List[dict], note: str, *, item_id: str, timestamp: str) -
             return True
     items.insert(0, build_note_item(note, item_id=item_id, timestamp=timestamp))
     return True
+
+
+def strip_stale_notes(items: Any) -> int:
+    """清掉上一轮注入的点歌提示。
+
+    这些提示可能被宿主持久化进对话历史，不清的话模型下一轮还会看见「用户想点歌」，
+    跟着再调一次播放工具。返回清掉的段数。
+    """
+    if not isinstance(items, list):
+        return 0
+    removed = 0
+    for item in list(items):
+        if not isinstance(item, dict):
+            continue
+        parts = item.get("parts")
+        if isinstance(parts, list):
+            kept = [
+                part
+                for part in parts
+                if not (
+                    isinstance(part, dict)
+                    and part.get("type") == "text"
+                    and str(part.get("text") or "").startswith(HINT_MARK)
+                )
+            ]
+            removed += len(parts) - len(kept)
+            if len(kept) != len(parts):
+                item["parts"] = kept
+        meta = item.get("meta")
+        item_id = str(meta.get("item_id") or "") if isinstance(meta, dict) else ""
+        if item_id.startswith("mimo-voice-song-"):
+            current = item.get("parts")
+            if not isinstance(current, list) or not current:
+                items.remove(item)
+                removed += 1
+    return removed

@@ -64,6 +64,7 @@ from .core.constants import (
     _AUDIO_SECONDS_CAP,
     _AUDIO_SECONDS_PER_CHAR,
     _FFMPEG_BIN,
+    _INTENT_ARMED_TTL_SECONDS,
     _INTENT_MIN_INTERVAL_SECONDS,
     _KEEP_TEXT_DELAY_SECONDS,
     _MAX_AUDIO_SECONDS,
@@ -199,6 +200,8 @@ class MiMoVoicePlugin(MaiBotPlugin):
         self._intent_last: Dict[str, float] = {}
         self._intent_patterns_cache: Optional[Tuple[Tuple[str, ...], List[Any]]] = None
         self._song_tool_stamp: Optional[Tuple[int, int]] = None
+        # 只在真的命中意图的那一轮把播放工具暴露给模型：session -> 过期时间
+        self._intent_armed: Dict[str, float] = {}
 
     # ------------------------------------------------------------------ 生命周期
 
@@ -1448,6 +1451,8 @@ class MiMoVoicePlugin(MaiBotPlugin):
         items = kwargs.get("items")
         if not isinstance(items, list):
             return None
+        # 上一轮注入的提示可能还留在历史里，先清掉再说，避免模型重复点歌
+        _song_intent.strip_stale_notes(items)
         inserted = _song_intent.append_hint(
             items,
             note,
@@ -1457,6 +1462,7 @@ class MiMoVoicePlugin(MaiBotPlugin):
         if not inserted:
             return None
         self._intent_last[session_id] = now
+        self._intent_armed[session_id] = now + _INTENT_ARMED_TTL_SECONDS
         self._song_cues.pop(session_id, None)
         if len(self._intent_last) > _TTL_CACHE_MAX_ENTRIES:
             self._intent_last.clear()
@@ -1471,6 +1477,16 @@ class MiMoVoicePlugin(MaiBotPlugin):
         )
         kwargs["items"] = items
         return {"action": "continue", "modified_kwargs": kwargs}
+
+    def _song_armed(self, session_id: str) -> bool:
+        """这一轮是不是刚由意图层放行过点歌（播放工具据此可见）。"""
+        if not session_id:
+            return False
+        expires_at = self._intent_armed.get(session_id, 0.0)
+        if expires_at <= time.monotonic():
+            self._intent_armed.pop(session_id, None)
+            return False
+        return True
 
     def _song_tool_ready(self) -> bool:
         """曲库非空才把播放工具暴露给模型；没有歌的时候它只会误导模型。"""
@@ -2444,8 +2460,9 @@ class MiMoVoicePlugin(MaiBotPlugin):
             "random_llm": {self._TOOL_VOICE_SAY},
         }.get(self.config.trigger.mode, set())
         hidden = {self._TOOL_TEXT_REPLY, self._TOOL_VOICE_SAY} - allowed
-        # 曲库为空（或功能没开）时不暴露播放工具：模型看到它就只会瞎编歌名
-        if not self._song_tool_ready():
+        # 播放工具只在「这一轮刚命中点歌意图」时暴露：曲库为空、或没命中时都给模型看见，
+        # 它就会自己找机会放歌（线上确实发生过没点歌也播了一次）。
+        if not self._song_tool_ready() or not self._song_armed(str(kwargs.get("session_id") or "")):
             hidden.add(self._TOOL_PLAY_SONG)
         if not hidden:
             return None
@@ -2544,6 +2561,7 @@ class MiMoVoicePlugin(MaiBotPlugin):
             self.ctx.logger.warning("点歌读取音频失败（%s）：%s", song.file, exc)
             return {"success": False, "content": "音频文件读不出来，改用文字告诉对方。"}
         delivered = await self._send_voice(stream_id, audio)
+        self._intent_armed.pop(stream_id, None)
         if not delivered:
             return {"success": False, "content": "语音发送失败了，用文字解释一下。"}
         self.ctx.logger.info(

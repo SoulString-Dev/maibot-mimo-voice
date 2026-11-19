@@ -10,7 +10,7 @@ README 只保留最新一版的要点。
 - **唱歌点播（`[songs]`，默认 `false`）**：管理员先发音频（语音条、mp3/wav/flac 文件或 QQ 文件消息），120 秒内用 `/voice sing add <歌名>` 入库；所有人可用 `/voice sing list` 看清单、`/voice sing <歌名/别名/标签>` 点播。最多 50 首、单首 5 分钟、单文件 20 MB；wav 默认降采样到 16 kHz 单声道（mp3/flac 原样保留）。曲库跟 `filters` 的群聊 / 私聊放行名单，不单独分群。
 - **入库流水线不拦截消息**：入站音频走 `chat.receive.after_process` 观察钩子旁路落盘到 `pending/`（不 abort、不改写原文），其他插件仍能拿到原始消息与下载链接；临时池 1 小时过期、总量超 300 MB 按最旧清理，兼作跨插件取音频的共享入口（`pending/index.json`）。
 - **维护命令**：`set <歌名> name/alias/tags <值>`（全量替换，全角/半角逗号、顿号、空格都算分隔符）、`addforce`（覆盖同名）、`del`（只认歌名，文件移到 `songs/.trash/`）。歌名与别名在库内唯一，重名请改用标签。
-- **意图层（不用打命令也能点歌）**：群里被 @ 或点名后说「唱一首雨爱」，插件把曲库候选注入本轮 planner 请求（`maisaka.planner.before_request`），模型判断要播就调用 `mimo_voice_play_song` 工具，语音条由插件直接发出。触发是正则（`songs.intent_patterns`，配置页一行一条，写错的跳过并告警），默认 `(?:唱|来|放|点)一?(?:首|个)`；`require_mention` 默认开（群里必须 @，私聊不要求）；同会话 30 秒内最多注入一次，曲库为空时不暴露播放工具。
+- **意图层（不用打命令也能点歌）**：群里被 @ 或点名后说「唱一首雨爱」，插件把曲库候选注入本轮 planner 请求（`maisaka.planner.before_request`），模型判断要播就调用 `mimo_voice_play_song` 工具，语音条由插件直接发出。触发是正则（`songs.intent_patterns`，配置页一行一条，写错的跳过并告警），默认 `(?:唱|来|放|点)一?(?:首|个)`；`require_mention` 默认开（群里必须 @，私聊不要求）；同会话 30 秒内最多注入一次；上一轮注入的提示会在下次 planner 请求前清掉；播放工具只在该轮命中意图时暴露（曲库为空或没命中都隐藏）。
 - **文件消息补链接**：QQ 私聊文件段只有 `file_id`、没有 url，插件用 `api.call` 调适配器公开的 `message.get_*_msg_history` + `file.get_*_file_url` 自己补下载地址（`songs.lookup_file_url`，默认开）；不需要改适配器。QQ 文件 CDN 只给 http，下载器因此允许 http，但内网/本机地址仍拒绝。
 
 ### 修改

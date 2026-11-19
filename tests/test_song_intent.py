@@ -125,6 +125,17 @@ items = [{"item_type": "UserMessageItem", "meta": {}, "parts": []}]
 checker.check("没有 system 消息时新建", intent.append_hint(items, "提示", item_id="x", timestamp="t"))
 checker.equal("新条目插在最前", items[0]["item_type"], "SystemMessageItem")
 
+stale_item = {"item_type": "SystemMessageItem", "meta": {"item_id": "keep"}, "parts": [
+    {"type": "text", "text": "普通系统提示"},
+    {"type": "text", "text": intent.HINT_MARK + "上一轮的点歌提示"},
+]}
+marker_item = {"item_type": "SystemMessageItem", "meta": {"item_id": "mimo-voice-song-abc"}, "parts": []}
+container = [stale_item, marker_item]
+removed = intent.strip_stale_notes(container)
+checker.equal("清掉旧点歌提示", removed, 2)
+checker.equal("普通提示保留", stale_item["parts"][0]["text"], "普通系统提示")
+checker.equal("空提示条目删除", len(container), 1)
+
 # ------------------------------------------------------------ 注入门控
 with temp_dir() as root:
     root = Path(root)
@@ -141,6 +152,7 @@ with temp_dir() as root:
     checker.check("候选里点名到的那首", "雨爱" in note, note)
     checker.check("提示里有关键词", "雨爱" in note, note)
     checker.check("线索消费后不再注入", inject(plugin) is None)
+    checker.check("注入后播放工具已放行", plugin._song_armed("s1"))
 
     cue(plugin, "来一个", session_id="s1", is_mentioned=True)
     note = note_of(inject(plugin, session_id="s2"))
@@ -209,8 +221,17 @@ with temp_dir() as root:
         {"function": {"name": "mimo_voice_play_song"}},
         {"function": {"name": "mimo_voice_text_reply"}},
     ]
-    result = asyncio.run(plugin.configure_planner_tools(tool_definitions=definitions))
+    result = asyncio.run(plugin.configure_planner_tools(tool_definitions=definitions, session_id="s1"))
     names = [item["function"]["name"] for item in result["modified_kwargs"]["tool_definitions"]]
-    checker.check("有歌时保留播放工具", "mimo_voice_play_song" in names, str(names))
+    checker.check("没命中意图时隐藏播放工具", "mimo_voice_play_song" not in names, str(names))
+
+    plugin._intent_armed["s1"] = __import__("time").monotonic() + 60
+    result = asyncio.run(plugin.configure_planner_tools(tool_definitions=definitions, session_id="s1"))
+    names = [item["function"]["name"] for item in result["modified_kwargs"]["tool_definitions"]]
+    checker.check("命中意图后暴露播放工具", "mimo_voice_play_song" in names, str(names))
+
+    result = asyncio.run(plugin.configure_planner_tools(tool_definitions=definitions, session_id="s2"))
+    names = [item["function"]["name"] for item in result["modified_kwargs"]["tool_definitions"]]
+    checker.check("别的会话仍然隐藏", "mimo_voice_play_song" not in names, str(names))
 
 sys.exit(checker.report())
