@@ -209,7 +209,7 @@ class MiMoVoicePlugin(MaiBotPlugin):
             "MiMo 语音插件已加载：音色=%s, mode=%s, probability=%.2f, 短句上限=%d字, 合成=%s, "
             "风格指令=%s, 参考策略=%s, 英文=%s, 随机需纯中文=%s, 超时=%.0fs, "
             "音色对齐=%s, 尾部裁剪=%dms, 尾部补静音=%dms, 峰值归一=%s, 群聊放行=%s, 私聊放行=%s, "
-            "点名优先=%s(%.2f), 情绪加权=%s(+%.2f/上限%.2f), 触发词=%s, 定时=%s",
+            "点名优先=%s(%.2f), 情绪加权=%s(+%.2f/上限%.2f), 触发词=%s, 定时=%s, 唱歌点播=%s",
             PRESET_DISPLAY_NAMES.get(self.config.voice.preset, self.config.voice.preset),
             self.config.trigger.mode,
             self.config.trigger.probability,
@@ -239,6 +239,11 @@ class MiMoVoicePlugin(MaiBotPlugin):
             (
                 f"开({len(self._scheduled_entries())} 条)"
                 if self.config.scheduled.enabled and self._scheduled_entries()
+                else "关"
+            ),
+            (
+                f"开({len(self._load_songs())} 首)"
+                if self.config.songs.enabled
                 else "关"
             ),
         )
