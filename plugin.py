@@ -1352,11 +1352,36 @@ class MiMoVoicePlugin(MaiBotPlugin):
         scope = str(payload.get("scope") or "").strip() or ("group" if group_id else "private")
         if not session_id or not self._filter_allows(scope, group_id or session_id, user_id):
             return
+        segments = payload.get("raw_message")
+        segments = segments if isinstance(segments, list) else []
+        kinds = sorted({str(seg.get("type") or "") for seg in segments if isinstance(seg, dict)})
+        audioish = (
+            VOICE_SEGMENT_TYPE in kinds
+            or "file" in kinds
+            or any(
+                isinstance(seg, dict)
+                and seg.get("type") == "text"
+                and "文件" in str(seg.get("data") or "")
+                for seg in segments
+            )
+        )
+        if audioish:
+            self.ctx.logger.info(
+                "入站音频候选：session=%s scope=%s 段=%s",
+                session_id,
+                scope,
+                ",".join(kinds) or "-",
+            )
         try:
             candidates = await self._inbound_audio(payload)
         except Exception as exc:  # 收集失败不能影响聊天链路
-            self.ctx.logger.debug("入站音频收集跳过：%s", exc)
+            self.ctx.logger.warning("入站音频收集失败：%s", exc)
             return
+        if audioish and not candidates:
+            self.ctx.logger.info(
+                "入站音频没取到字节（段=%s）：语音条缺 binary_data_base64，或文件消息没有可下载的链接",
+                ",".join(kinds) or "-",
+            )
         for data, suffix, source in candidates:
             try:
                 await self._stash_song_media(
@@ -1386,6 +1411,17 @@ class MiMoVoicePlugin(MaiBotPlugin):
                 data = self._decode_segment_audio(segment)
                 if data:
                     found.append((data, ".wav", "voice"))
+                continue
+            if kind == "file":
+                # 有的适配器把文件消息留成 file 段（data 里带 url/name），没转成文本。
+                raw = segment.get("data")
+                text = raw if isinstance(raw, str) else " ".join(str(raw.get(key) or "") for key in ("url", "file", "name")) if isinstance(raw, dict) else ""
+                url = _song_media.extract_file_url(text)
+                if not url:
+                    continue
+                data = await self._download_media(url)
+                if data:
+                    found.append((data, _song_media.guess_extension(url) or ".mp3", "file"))
                 continue
             if kind != "text":
                 continue
