@@ -294,4 +294,15 @@ with temp_dir() as root:
     checker.equal("非音频不查历史", url, "")
     checker.equal("非音频零调用", len(calls), 0)
 
+# ---------------------------------------------------------------- api.call 返回拆包
+with temp_dir() as root:
+    plugin, config, _logger = make(Path(root))
+    envelope = {"status": "ok", "retcode": 0, "data": {"messages": [{"message": []}]}}
+    checker.equal("拆 NapCat 信封", plugin._unwrap_adapter_response(envelope, "x"), {"messages": [{"message": []}]})
+    wrapped = {"success": True, "result": envelope}
+    checker.equal("拆宿主 + 信封两层", plugin._unwrap_adapter_response(wrapped, "y"), {"messages": [{"message": []}]})
+    denied = {"success": False, "error": "插件 xxx 未获授权能力: api.call"}
+    checker.equal("拒绝时返回 None", plugin._unwrap_adapter_response(denied, "z"), None)
+    checker.equal("无法识别返回 None", plugin._unwrap_adapter_response("oops", "w"), None)
+
 sys.exit(checker.report())

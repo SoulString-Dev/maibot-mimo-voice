@@ -1452,14 +1452,30 @@ class MiMoVoicePlugin(MaiBotPlugin):
         except Exception as exc:  # 适配器没这个 API / 宿主不支持，都不该影响聊天
             self._warn_once(f"songs:api:{api_name}", "调用适配器 API %s 失败：%s", api_name, exc)
             return None
-        if not isinstance(result, dict) or not result.get("success"):
-            error = str(result.get("error") or "无返回") if isinstance(result, dict) else "无返回"
+        return self._unwrap_adapter_response(result, api_name)
+
+    def _unwrap_adapter_response(self, result: Any, api_name: str) -> Any:
+        """把 ``api.call`` 的返回拆成业务数据。
+
+        实测（2026-11-20）返回的是 NapCat 原始信封：``{"status": "ok", "retcode": 0, "data": {...}}``；
+        有的宿主播还会再包一层 ``{"success": true, "result": <信封>}``，两种都认。
+        """
+        payload = result
+        if isinstance(payload, dict) and payload.get("success") is True:
+            payload = payload.get("result")
+        if isinstance(payload, dict) and payload.get("status") in ("ok", "async") and "data" in payload:
+            return payload.get("data")
+        if isinstance(payload, dict) and payload.get("success") is False:
+            error = str(payload.get("error") or "未知原因")
             self._warn_once(f"songs:api:{api_name}", "适配器 API %s 不可用：%s", api_name, error)
             return None
-        payload = result.get("result")
-        if isinstance(payload, dict) and isinstance(payload.get("data"), (dict, list)):
-            return payload["data"]
-        return payload
+        self._warn_once(
+            f"songs:api:{api_name}",
+            "适配器 API %s 返回了无法识别的结构：%r",
+            api_name,
+            result if not isinstance(result, str) else result[:200],
+        )
+        return None
 
     async def _resolve_file_url(self, text: str, *, group_id: str, user_id: str) -> str:
         """文件消息只有文件名时，回查最近历史拿 ``file_id``，再向适配器要下载地址。
