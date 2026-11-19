@@ -110,6 +110,8 @@ hit = intent.match_intent("雨爱来一个", defaults)
 checker.check("歌名在前也能认", hit is not None and hit.keyword == "雨爱", str(hit))
 hit = intent.match_intent("放首《雨爱》", defaults)
 checker.check("书名号剥掉", hit is not None and hit.keyword == "雨爱", str(hit))
+hit = intent.match_intent("来首雨爱呗", defaults)
+checker.check("句尾语气词「呗」剥掉", hit is not None and hit.keyword == "雨爱", str(hit))
 checker.check("普通聊天不命中", intent.match_intent("今天天气不错", defaults) is None)
 
 note = intent.build_hint(["雨爱 · 2:20 · 别名 司凤"], "雨爱", 5)
