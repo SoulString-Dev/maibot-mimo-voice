@@ -340,4 +340,13 @@ with temp_dir() as root:
     songs, _warnings = lib.load_library(Path(root) / "songs" / "songs.json")
     checker.equal("兜底后曲库 1 首", len(songs), 1)
 
+# ---------------------------------------------------------------- 认领后的重复收集
+with temp_dir() as root:
+    plugin, config, _logger = make(Path(root))
+    collect(plugin, voice_payload(wav_bytes(1.5)))
+    private(plugin, "/voice sing add 雨爱")
+    checker.equal("入库后暂存清空", len(pending_mod.PendingPool(Path(root) / "pending").items()), 0)
+    collect(plugin, voice_payload(wav_bytes(1.5)))  # 同一条消息的第二次钩子
+    checker.equal("认领过的音频不再暂存", len(pending_mod.PendingPool(Path(root) / "pending").items()), 0)
+
 sys.exit(checker.report())

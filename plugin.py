@@ -185,6 +185,9 @@ class MiMoVoicePlugin(MaiBotPlugin):
         self._self_sent_texts: Dict[Tuple[str, str], float] = {}
         # 唱歌点歌（0.7.0）：暂存池句柄、曲库目录缓存与点歌冷却（会话/个人）
         self._pending_cache: Optional[PendingPool] = None
+        # 刚被 /voice sing add 认领过的音频（sha256 → 记录时间）：钩子有时会为同一条消息再跑一次，
+        # 不挡住的话会在入库后又往 pending/ 里补一份永远没人认领的副本。
+        self._consumed_media: Dict[str, float] = {}
         self._sing_group_last: Dict[str, float] = {}
         self._sing_user_last: Dict[str, float] = {}
 
@@ -1618,6 +1621,12 @@ class MiMoVoicePlugin(MaiBotPlugin):
                 lowered = None
             if lowered:
                 payload = lowered
+        digest = hashlib.sha256(payload).hexdigest()
+        consumed_at = self._consumed_media.get(digest)
+        if consumed_at is not None:
+            if time.monotonic() - consumed_at < 600.0:
+                return
+            self._consumed_media.pop(digest, None)
         duration = await asyncio.to_thread(_song_media.probe_duration, payload, ext)
         if duration > float(config.max_duration_seconds) + 1.0:
             self.ctx.logger.info(
@@ -1921,6 +1930,9 @@ class MiMoVoicePlugin(MaiBotPlugin):
         if previous is not None and previous.file and previous.file != file_name:
             await asyncio.to_thread(self._quiet_unlink, root / previous.file)
         await asyncio.to_thread(pool.discard, item)
+        self._consumed_media[item.sha256] = time.monotonic()
+        if len(self._consumed_media) > 200:
+            self._consumed_media.clear()
         verb = "已替换" if previous is not None else "已入库"
         await self._command_reply(
             stream_id,
