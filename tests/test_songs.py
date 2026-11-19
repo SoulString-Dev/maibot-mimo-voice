@@ -492,4 +492,21 @@ with temp_dir() as root:
         "private-dns",
     )
 
+# ---------------------------------------------------------------- 索引外的孤儿文件也清理
+with temp_dir() as root:
+    plugin, config, _logger = make(Path(root))
+    pool_dir = Path(root) / "pending"
+    pool_dir.mkdir(parents=True, exist_ok=True)
+    orphan = pool_dir / "orphan.wav"
+    orphan.write_bytes(b"\0" * 128)
+    stamp = time.time() - 7200
+    import os
+
+    os.utime(orphan, (stamp, stamp))
+    fresh_orphan = pool_dir / "fresh.wav"
+    fresh_orphan.write_bytes(b"\0" * 128)
+    asyncio.run(plugin._song_housekeeping_once())
+    checker.check("过期孤儿文件被清", not orphan.exists())
+    checker.check("新孤儿文件保留", fresh_orphan.exists())
+
 sys.exit(checker.report())

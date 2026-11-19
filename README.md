@@ -420,7 +420,7 @@ private_mode = "all"
 │   ├── song_library.py          # 曲库：songs.json 读写 / 匹配 / 别名与标签
 │   ├── song_media.py            # 音频探测（mp3 / wav / flac 时长）与 wav 降采样
 │   └── pending.py               # 临时池：入站音频旁路落盘、认领与过期清理
-├── tests/                       # 591 条断言，不依赖 pytest
+├── tests/                       # 593 条断言，不依赖 pytest
 ├── config.example.toml
 ├── _manifest.json
 ├── assets/icon.svg              # 商店图标
@@ -532,7 +532,7 @@ python -c "import tomllib; tomllib.load(open('config.example.toml','rb'))"
 pip install -r requirements-dev.txt
 ruff check .
 mypy plugin.py core   # 需先装 maibot-plugin-sdk，否则基类被当作 Any，会漏掉 self.config 的类型问题
-python tests/run_all.py     # 十五组共 591 条断言（文本/音频/配置/超时/触发/命令/触发词/定时/并存/API/点播/曲库/探测/意图层）
+python tests/run_all.py     # 十五组共 593 条断言（文本/音频/配置/超时/触发/命令/触发词/定时/并存/API/点播/曲库/探测/意图层）
 ```
 
 Windows 上等价的一条命令：`pwsh -File tools/run_checks.ps1`（已处理控制台编码与临时目录的差异）。

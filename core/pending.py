@@ -254,7 +254,25 @@ class PendingPool:
             total -= oldest.size
             removed += 1
 
-        if removed:
+        # 索引里没有的孤儿文件（例如入库后钩子又把文件写回来、或索引被外部清掉）也要清，
+        # 否则 pending/ 会一直涨；只删超过 TTL 的，避免误删刚写盘、索引还没落地的文件。
+        if ttl:
+            referenced = {item.file for item in kept}
+            try:
+                entries = list(self.root.iterdir())
+            except OSError:
+                entries = []
+            for path in entries:
+                if not path.is_file() or path.name == INDEX_NAME or path.name in referenced:
+                    continue
+                try:
+                    if stamp - path.stat().st_mtime > ttl:
+                        path.unlink()
+                        removed += 1
+                except OSError:
+                    continue
+
+        if removed or kept != items:
             self._save(kept)
         return removed
 

@@ -2,7 +2,7 @@
 
 > 写给以后还想继续把它做得更好的自己。商店最新可装 **0.6.0**（11-18 13:16 发版，tag/Release `6606dce`，Release id `449554364`；11-19 00:39 自动收录，审核单 [#1724](https://github.com/Mai-with-u/plugin-repo/issues/1724)，`decision=pass`、`risks=[]`）；上一版 0.5.6 = `accced2`（11-11 07:13 收录 [#1584](https://github.com/Mai-with-u/plugin-repo/issues/1584)）、0.5.5 = `f519fa0`（11-10 01:33 收录 #1544）、0.5.4 = `0ab88e2`（11-08 05:46 收录 #1496）。
 >
-> **0.7.0 状态（2026-11-20 02:5x）**：唱歌点播 + 意图层 + P0/P1/P2 加固已写完并在 NAS 私聊/群聊真机验证，15 个文件 **591** 条断言全绿；NAS 插件目录已铺开发版（`plugin.py` sha256 与本地一致），线上 `[songs] enabled=true`、曲库 2 首，`config.toml` 已按 0.7.0 新键重写（旧 `trigger_words` 删除，补 `max_total_mb` / `lookup_file_url` / `intent_patterns` / `intent_names` / `require_mention`）。**用户决定先观察一两天再打 tag 发 0.7.0**。
+> **0.7.0 状态（2026-11-20 02:5x）**：唱歌点播 + 意图层 + P0/P1/P2 加固已写完并在 NAS 私聊/群聊真机验证，15 个文件 **593** 条断言全绿；NAS 插件目录已铺开发版（`plugin.py` sha256 与本地一致），线上 `[songs] enabled=true`、曲库 3 首，`config.toml` 已按 0.7.0 新键重写（旧 `trigger_words` 删除，补 `max_total_mb` / `lookup_file_url` / `intent_patterns` / `intent_names` / `require_mention`）。**用户决定先观察一两天再打 tag 发 0.7.0**。
 >
 > 0.6.0 内容：语音 + 文字并存（`delivery.keep_text`，默认关）、内建定时语音（`[scheduled]`，默认关）、对外 API `voice_say`（`api.token` 共享口令 + 全局限流）、单测接入 CI；设计见 `docs/superpowers/specs/2026-11-11-voice-0.6.0-design.md`，计划见 `docs/superpowers/plans/2026-11-11-voice-0.6.0.md`；11 个文件 369 条断言全绿。11-16/11-17 两处线上修正：并存改成文字、语音各一条（混合数组部分适配器只落地语音段）；插件自己发出的文字按 `(会话, 文本)` 记 10 秒标记、不再被转成语音（此前 `keep_text` 会连出 2–3 条语音、`/voice say` 回执也会被读出来），`/voice test|say` 开 `keep_text` 时也带文字。
 >
