@@ -257,7 +257,17 @@ text = "早上好，今天也要加油呀"
 /voice sing list          曲库清单（合并转发卡片，表头 + 每首歌一条、带序号）
 /voice sing 雨爱          按歌名点歌，多个命中随机挑一首
 /voice sing 下雨          ｜别名｜标签同样能命中
+/voice sing random         随机一首（避开本会话最近放过的 3 首）
 ```
+
+**定向发歌**（管理员，**只能私聊**）：把曲库里的一首直接发到指定群/QQ，目标写法与 `/voice say` 相同（`g群号` / `uQQ号` / 纯数字先群后私聊）：
+
+```
+/voice sing send g123456 雨爱      发到指定群
+/voice sing random u10000002       随机一首发到指定私聊
+```
+
+目标会话必须在 `filters` 放行名单里、且没被 `/voice off` 关掉；定向发歌只对**发起命令的人**计冷却（30 / 10 秒），不限制同一目标多久能收一次——命令方是管理员，按可信处理。
 
 **维护**（管理员，**只能私聊**）：
 
@@ -271,7 +281,7 @@ text = "早上好，今天也要加油呀"
 规则：
 
 - 歌名与别名在库内**唯一**；重名（比如同一首歌的两个版本）请改用标签区分。
-- `add` / `addforce` / `del` / `set` 与 `test`、`say` 一样**只限私聊**；群里只放行 `list` 和点歌，群里发这几个命令会收到「这些命令只在私聊里可用」。
+- `add` / `addforce` / `del` / `set` / `send` 与 `test`、`say` 一样**只限私聊**；群里只放行 `list`、点歌和 `random`，群里发这几个命令会收到「这些命令只在私聊里可用」。
 - `del` 只认歌名，避免拿别名误删；要删别名请先 `set ... alias` 改成只剩歌名。
 - 冷却：同一会话 30 秒、同一人 10 秒（`sing_group_cooldown_seconds` / `sing_user_cooldown_seconds`）。
 - 会话被 `/voice off` 关掉后点歌直接拒绝；曲库不分群，跟随 `filters` 的群聊 / 私聊放行名单。
@@ -297,6 +307,7 @@ intent_patterns = ["(?:唱|来|放|点)一?(?:首|个)"]
 | `intent_names` | `[]` | 额外算作「点名」的称呼；bot 昵称与 `alias_names` 会自动从宿主配置读，这里补黑话 |
 | `require_mention` | `true` | 群里必须被 @ 或点名；关掉后正则命中就注入（误触发会变多） |
 | `intent_candidates` | `5` | 最多给模型看几首候选 |
+| `random_patterns` | `["(?:随机|随便|任意)(?:来|放)?(?:一)?(?:首|个)"]` | 随机点歌正则；命中后模型调用 `mimo_voice_play_random`，从曲库随机发一首（避开本会话最近 3 首） |
 
 注入只在命中后发生一次，同一会话 30 秒内不重复注入；上一轮注入的提示会在下一次 planner 请求前清掉。播放工具（`mimo_voice_play_song`）只在这一轮命中了意图时才暴露给模型——曲库为空、或没命中时都给模型看见，它会自己找机会放歌（线上确实发生过一次没点歌也播了）。
 
@@ -326,7 +337,7 @@ private_mode = "all"
 下载前还会校验域名与内网地址（见上文「松」与安全说明）。不开启唱歌点播（`songs.enabled = false`，默认）
 时这些 API 一次都不会被调用。
 
-## 配置说明（共 75 项，日常只需动前 12 项）
+## 配置说明（共 76 项，日常只需动前 12 项）
 
 ### 基础
 
@@ -420,7 +431,7 @@ private_mode = "all"
 │   ├── song_library.py          # 曲库：songs.json 读写 / 匹配 / 别名与标签
 │   ├── song_media.py            # 音频探测（mp3 / wav / flac 时长）与 wav 降采样
 │   └── pending.py               # 临时池：入站音频旁路落盘、认领与过期清理
-├── tests/                       # 593 条断言，不依赖 pytest
+├── tests/                       # 636 条断言，不依赖 pytest
 ├── config.example.toml
 ├── _manifest.json
 ├── assets/icon.svg              # 商店图标
@@ -484,7 +495,7 @@ private_mode = "all"
 
 ### 0.7.0
 
-- **唱歌点播**（`[songs]`，默认关）：管理员发音频后 `/voice sing add <歌名>` 入库；所有人 `/voice sing list` 看清单、`/voice sing <歌名/别名/标签>` 点播。最多 50 首、单首 5 分钟、单文件 20 MB，mp3/wav/flac 直发。另有意图层：群里被 @ 后说「唱一首雨爱」，插件把曲库候选交给模型挑，模型调用 `mimo_voice_play_song` 就直接发语音条。
+- **唱歌点播**（`[songs]`，默认关）：管理员发音频后 `/voice sing add <歌名>` 入库；所有人 `/voice sing list` 看清单、`/voice sing <歌名/别名/标签>` 点播、`random` 随机一首（避开最近 3 首）。管理员还能 `/voice sing send <目标> <歌名>` 把歌直接发到指定群/QQ。最多 50 首、单首 5 分钟、单文件 20 MB，mp3/wav/flac 直发。另有意图层：群里被 @ 后说「唱一首雨爱」或「随机来一首」，插件把候选/随机提示交给模型，模型调用 `mimo_voice_play_song` / `mimo_voice_play_random` 就直接发语音条。
 - **旁路收集**：入站音频走观察钩子落盘到 `pending/`，不拦截、不改写原文，其他插件照旧可用；1 小时过期、总量 300 MB 上限。
 - **维护命令**：`set name/alias/tags`（全量替换）、`addforce`、`del`（只认歌名）；歌名与别名库内唯一；入库与维护跟 `test`/`say` 一样**只限私聊管理员**。
 - `/voice sing` 在群聊里也能用（其余命令仍是仅私聊、仅管理员）；新增纯标准库音频探测，不依赖 ffmpeg。
@@ -532,7 +543,7 @@ python -c "import tomllib; tomllib.load(open('config.example.toml','rb'))"
 pip install -r requirements-dev.txt
 ruff check .
 mypy plugin.py core   # 需先装 maibot-plugin-sdk，否则基类被当作 Any，会漏掉 self.config 的类型问题
-python tests/run_all.py     # 十五组共 593 条断言（文本/音频/配置/超时/触发/命令/触发词/定时/并存/API/点播/曲库/探测/意图层）
+python tests/run_all.py     # 十五组共 636 条断言（文本/音频/配置/超时/触发/命令/触发词/定时/并存/API/点播/曲库/探测/意图层）
 ```
 
 Windows 上等价的一条命令：`pwsh -File tools/run_checks.ps1`（已处理控制台编码与临时目录的差异）。

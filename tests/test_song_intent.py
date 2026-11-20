@@ -251,4 +251,28 @@ with temp_dir() as root:
     names = [item["function"]["name"] for item in result["modified_kwargs"]["tool_definitions"]]
     checker.check("别的会话仍然隐藏", "mimo_voice_play_song" not in names, str(names))
 
+# ---------------------------------------------------------------- 随机点歌（0.7.0 增量）
+random_patterns, _warnings = intent.compile_patterns(list(intent.DEFAULT_RANDOM_PATTERNS))
+checker.check("默认随机正则命中「随机来一首」", intent.matches_any("随机来一首", random_patterns))
+checker.check("默认随机正则命中「随便放一个」", intent.matches_any("随便放一个", random_patterns))
+checker.check("随机正则不误伤点歌", not intent.matches_any("来一首雨爱", random_patterns))
+checker.check("随机正则先剥 @", intent.matches_any("@小鲸鱼 随机来首", random_patterns))
+checker.check("随机提示带工具名", "mimo_voice_play_random" in intent.build_random_hint())
+
+with temp_dir() as root:
+    seed_library(Path(root), [("雨爱", ["yua"], ["女声"])])
+    plugin, _config, _logger = make(Path(root))
+    cue(plugin, "小鲸鱼，随机来一首", scope="private", group_id="")
+    result = inject(plugin, session_id="s1")
+    checker.check("随机意图注入提示", "mimo_voice_play_random" in note_of(result), note_of(result)[:60])
+    checker.check("随机意图标记 armed", plugin._song_random_armed("s1"))
+    checker.check("随机意图不动具名 armed", not plugin._song_armed("s1"))
+    songs = plugin._load_songs()
+    checker.equal("曲库读到 1 首", len(songs), 1)
+
+    played = asyncio.run(plugin.play_random(stream_id="s1"))
+    checker.check("随机工具调用成功", played.get("success") is True, str(played)[:80])
+    checker.equal("随机工具放出 1 条语音", len(plugin.ctx.send.hybrids), 1)
+    checker.check("随机工具用完解除 armed", not plugin._song_random_armed("s1"))
+
 sys.exit(checker.report())

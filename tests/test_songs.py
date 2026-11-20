@@ -509,4 +509,120 @@ with temp_dir() as root:
     checker.check("过期孤儿文件被清", not orphan.exists())
     checker.check("新孤儿文件保留", fresh_orphan.exists())
 
+# ---------------------------------------------------------------- 随机发歌 / 定向发歌（0.7.0 增量）
+def seed_songs(root: Path, names: list[str]) -> None:
+    songs_dir = root / "songs"
+    songs_dir.mkdir(parents=True, exist_ok=True)
+    library = []
+    for index, name in enumerate(names):
+        file_name = f"s{index}.wav"
+        (songs_dir / file_name).write_bytes(wav_bytes(1.2))
+        library.append(lib.Song(id=f"s{index}", name=name, file=file_name, duration_s=1.2))
+    lib.save_library(songs_dir / "songs.json", library)
+
+
+with temp_dir() as root:
+    plugin, _config, _logger = make(Path(root), sing_group_cooldown_seconds=0.0, sing_user_cooldown_seconds=0.0)
+    seed_songs(Path(root), ["甲", "乙", "丙", "丁"])
+    command(plugin, "/voice sing random")
+    command(plugin, "/voice sing random")
+    recent = plugin._sing_recent.get("s1") or []
+    checker.equal("随机发出 2 条语音", len(voice_segments(plugin)), 2)
+    checker.check("随机记下最近播放", len(recent) == 2, str(recent))
+    checker.check("两次随机不重复", len(set(recent)) == 2, str(recent))
+    checker.equal("随机成功不回文字", plugin.ctx.send.texts[-1][1] if plugin.ctx.send.texts else "", "")
+
+with temp_dir() as root:
+    plugin, _config, _logger = make(Path(root), sing_group_cooldown_seconds=0.0, sing_user_cooldown_seconds=0.0)
+    seed_songs(Path(root), ["甲", "乙"])
+    for _ in range(3):
+        command(plugin, "/voice sing random")
+    checker.equal("库太小仍能随机（退化为全库）", len(voice_segments(plugin)), 3)
+    checker.equal("最近播放最多 3 条", len(plugin._sing_recent["s1"]), 2)
+
+with temp_dir() as root:
+    plugin, _config, _logger = make(Path(root))
+    seed_songs(Path(root), ["雨爱"])
+    reply = private(plugin, "/voice sing send g555 雨爱")
+    checker.check("定向发歌回执", "群 555" in reply, reply)
+    checker.equal("定向发歌发出 1 条语音", len(voice_segments(plugin)), 1)
+    checker.check(
+        "目标为新建的群会话",
+        any(item[0] == "group" and item[1] == "555" for item in plugin.ctx.chat.opened),
+        str(plugin.ctx.chat.opened),
+    )
+
+with temp_dir() as root:
+    plugin, _config, _logger = make(Path(root))
+    seed_songs(Path(root), ["甲", "乙"])
+    reply = private(plugin, "/voice sing random u777")
+    checker.check("定向随机回执", "私聊 777" in reply, reply)
+    checker.equal("定向随机发出 1 条语音", len(voice_segments(plugin)), 1)
+
+with temp_dir() as root:
+    plugin, _config, _logger = make(Path(root))
+    seed_songs(Path(root), ["雨爱"])
+    reply = private(plugin, "/voice sing send g555 雨爱", user_id="999")
+    checker.check("非管理员不能定向发歌", "管理员" in reply, reply)
+    checker.equal("非管理员没发出语音", len(voice_segments(plugin)), 0)
+    reply = command(plugin, "/voice sing send g555 雨爱")
+    checker.check("群里不能定向发歌", "只在私聊" in reply, reply)
+    before_texts = len(plugin.ctx.send.texts)
+    before_voices = len(voice_segments(plugin))
+    command(plugin, "/voice sing random")
+    checker.equal("群里能随机发歌（成功不回执）", len(plugin.ctx.send.texts), before_texts)
+    checker.equal("群里随机发出语音", len(voice_segments(plugin)), before_voices + 1)
+
+with temp_dir() as root:
+    plugin, _config, _logger = make_plugin(
+        module,
+        songs={"enabled": True},
+        commands={"admins": ["456"]},
+        filters={"private_mode": "whitelist", "private_user_ids": ["456"]},
+    )
+    plugin.__dict__["_ctx"] = FakeCtx(FakeLogger(), data_dir=Path(root))
+    seed_songs(Path(root), ["雨爱"])
+    reply = private(plugin, "/voice sing send u777 雨爱")
+    checker.check("目标不在放行名单时拒绝", "放行名单" in reply, reply)
+
+with temp_dir() as root:
+    plugin, _config, _logger = make(Path(root))
+    seed_songs(Path(root), ["雨爱"])
+    plugin._session_switch["group:555"] = False
+    reply = private(plugin, "/voice sing send g555 雨爱")
+    checker.check("目标会话已关闭时拒绝", "已关闭" in reply, reply)
+    checker.equal("没发出语音", len(voice_segments(plugin)), 0)
+
+with temp_dir() as root:
+    plugin, _config, _logger = make(Path(root))
+    seed_songs(Path(root), ["甲", "乙"])
+    private(plugin, "/voice sing random")
+    reply = private(plugin, "/voice sing send g555 甲")
+    checker.check("定向发歌共用点歌冷却", "刚点过" in reply or "有点快" in reply, reply)
+
+with temp_dir() as root:
+    plugin, _config, _logger = make(Path(root))
+    seed_songs(Path(root), ["甲"])
+    tools = [
+        {"type": "function", "function": {"name": "mimo_voice_play_song"}},
+        {"type": "function", "function": {"name": "mimo_voice_play_random"}},
+        {"type": "function", "function": {"name": "mimo_voice_say"}},
+    ]
+
+    def visible(**kwargs):
+        result = asyncio.run(plugin.configure_planner_tools(**kwargs))
+        items = (result or {}).get("modified_kwargs", {}).get("tool_definitions", kwargs["tool_definitions"])
+        return [item["function"]["name"] for item in items]
+
+    names = visible(tool_definitions=list(tools), session_id="s1")
+    checker.check("未命中意图时两个播放工具都藏", "mimo_voice_play_song" not in names and "mimo_voice_play_random" not in names, str(names))
+    plugin._random_armed["s1"] = time.monotonic() + 60
+    names = visible(tool_definitions=list(tools), session_id="s1")
+    checker.check("随机命中只露随机工具", "mimo_voice_play_random" in names and "mimo_voice_play_song" not in names, str(names))
+    plugin._random_armed.pop("s1", None)
+    plugin._intent_armed["s1"] = time.monotonic() + 60
+    names = visible(tool_definitions=list(tools), session_id="s1")
+    checker.check("具名命中只露点歌工具", "mimo_voice_play_song" in names and "mimo_voice_play_random" not in names, str(names))
+
+
 sys.exit(checker.report())

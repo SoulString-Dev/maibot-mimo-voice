@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import random
 import re
 import unicodedata
 from dataclasses import dataclass, field
@@ -27,7 +28,7 @@ AUDIO_EXTENSIONS = (".mp3", ".wav", ".flac")
 _SEPARATORS = re.compile(r"[,，、\s]+")
 
 # 这些词是子命令关键字，拿来当歌名会让 /voice sing 的命令解析歧义
-RESERVED_WORDS = ("list", "add", "addforce", "del", "set")
+RESERVED_WORDS = ("list", "add", "addforce", "del", "set", "send", "random")
 
 _LIBRARY_FILE = "songs.json"
 
@@ -243,6 +244,17 @@ def match_songs(songs: Sequence[Song], query: str) -> List[Song]:
     return result
 
 
+def pick_random(songs: Sequence[Song], exclude_ids: Sequence[str] = ()) -> Optional[Song]:
+    """随机取一首；优先避开 ``exclude_ids``，可用歌曲不够时退回全库。"""
+    skipped = {str(item) for item in exclude_ids}
+    pool = [song for song in songs if song.id not in skipped]
+    if not pool:
+        pool = list(songs)
+    if not pool:
+        return None
+    return random.choice(pool)
+
+
 def render_library(songs: Sequence[Song]) -> List[str]:
     """``list`` 的每一行；空曲库返回提示行。"""
     if not songs:
@@ -254,7 +266,7 @@ def parse_sing(rest: str) -> Tuple[str, str, str, str]:
     """拆 ``/voice sing`` 后面的参数。
 
     返回 ``(动作, 歌名, 字段, 值)``，动作取值：
-    ``list`` / ``add`` / ``addforce`` / ``del`` / ``set`` / ``sing``。
+    ``list`` / ``add`` / ``addforce`` / ``del`` / ``set`` / ``send`` / ``random`` / ``sing``。
     """
     body = str(rest or "").strip()
     if not body:
@@ -270,6 +282,11 @@ def parse_sing(rest: str) -> Tuple[str, str, str, str]:
         name, _, remainder = tail.strip().partition(" ")
         field_name, _, value = remainder.strip().partition(" ")
         return "set", name.strip(), field_name.strip().lower(), value.strip()
+    if lowered == "send":
+        target, _, name = tail.strip().partition(" ")
+        return "send", name.strip(), "", target.strip()
+    if lowered == "random":
+        return "random", "", "", tail.strip()
     return "sing", body, "", ""
 
 

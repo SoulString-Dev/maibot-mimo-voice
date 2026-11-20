@@ -136,4 +136,22 @@ with temp_dir() as root:
 
 checker.check("空库提示", "空" in lib.render_library([])[0])
 
+# ---------------------------------------------------------------- 随机与命令解析（0.7.0 增量）
+samples = [
+    lib.Song(id="a", name="甲", file="a.mp3"),
+    lib.Song(id="b", name="乙", file="b.mp3"),
+    lib.Song(id="c", name="丙", file="c.mp3"),
+    lib.Song(id="d", name="丁", file="d.mp3"),
+]
+picked = {lib.pick_random(samples, ["a", "b", "c"]).id for _ in range(20)}
+checker.equal("pick_random 只从没播过的里挑", picked, {"d"})
+checker.check("pick_random 排除后可能为空时退化", lib.pick_random(samples, ["a", "b", "c", "d"]).id in {"a", "b", "c", "d"})
+checker.equal("空库返回 None", lib.pick_random([], []), None)
+
+checker.equal("send 解析", lib.parse_sing("send g123 雨爱"), ("send", "雨爱", "", "g123"))
+checker.equal("random 解析（无目标）", lib.parse_sing("random"), ("random", "", "", ""))
+checker.equal("random 解析（带目标）", lib.parse_sing("random u456"), ("random", "", "", "u456"))
+checker.equal("send 缺歌名", lib.parse_sing("send g123"), ("send", "", "", "g123"))
+checker.check("send/random 是保留字", "send" in lib.RESERVED_WORDS and "random" in lib.RESERVED_WORDS)
+
 sys.exit(checker.report())

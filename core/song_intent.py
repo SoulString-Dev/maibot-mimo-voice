@@ -17,6 +17,9 @@ MAX_PATTERNS = 20
 # 「唱首」「来一个」「放一首」都命中；配置页整行替换即可换成任意正则。
 DEFAULT_PATTERNS: Tuple[str, ...] = ("(?:唱|来|放|点)一?(?:首|个)",)
 
+# 随机点歌的说法（用户 2026-11-20 指定，暂不支持按标签筛）
+DEFAULT_RANDOM_PATTERNS: Tuple[str, ...] = ("(?:随机|随便|任意)(?:来|放)?(?:一)?(?:首|个)",)
+
 # 注入提示的固定前缀：下一轮 planner 请求时按它把上一轮留下的提示清掉
 HINT_MARK = "【点歌提示】"
 
@@ -31,10 +34,15 @@ _MAX_KEYWORD = 40
 
 @dataclass(frozen=True)
 class IntentHit:
-    """一次命中：命中的是哪条正则、猜出来的歌名（可能为空串）。"""
+    """一次命中：命中的是哪条正则、猜出来的歌名（可能为空串）。
+
+    ``after`` 表示歌名取自匹配之后（True）还是匹配之前的兜底（False）——
+    「随机来一首」这里前面的字只是残句，不能当歌名。
+    """
 
     pattern: str
     keyword: str
+    after: bool = True
 
 
 def compile_patterns(raw: Any) -> Tuple[List[re.Pattern[str]], List[str]]:
@@ -108,11 +116,31 @@ def match_intent(text: str, patterns: Sequence[re.Pattern[str]]) -> Optional[Int
             continue
         # 取匹配之后的部分当歌名猜测：「唱一首雨爱」→「雨爱」；「来一首」→ 空串
         keyword = _clean_keyword(body[match.end() :])
+        after = True
         if not keyword and match.start() > 0:
             # 歌名写在前面（「雨爱来一个」）也认一下
             keyword = _clean_keyword(body[: match.start()])
-        return IntentHit(pattern=pattern.pattern, keyword=keyword)
+            after = False
+        return IntentHit(pattern=pattern.pattern, keyword=keyword, after=after)
     return None
+
+
+def matches_any(text: str, patterns: Sequence[re.Pattern[str]]) -> bool:
+    """文本里是否出现任意一条正则（先剥掉开头的 @昵称）。"""
+    body = strip_mentions(text)
+    if not body:
+        return False
+    return any(pattern.search(body) is not None for pattern in patterns)
+
+
+def build_random_hint() -> str:
+    """拼「用户想随机听一首」的注入提示。"""
+    return (
+        HINT_MARK
+        + "用户想随机听一首。\n"
+        + "调用 mimo_voice_play_random 工具即可，系统会从曲库里挑一首（优先避开最近播过的）直接发语音条；"
+        "不必报歌名，也不要说自己会唱。"
+    )
 
 
 def build_hint(candidates: Sequence[str], keyword: str, limit: int = 5) -> str:

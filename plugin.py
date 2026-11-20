@@ -30,6 +30,7 @@ import tomllib
 import unicodedata
 import uuid
 import wave
+from collections import deque
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, cast
@@ -100,6 +101,7 @@ from .core.constants import (
     _SELF_SENT_MAX_ENTRIES,
     _SELF_SENT_TEXT_TTL_SECONDS,
     _SILENCE_DBFS,
+    _SING_RECENT_KEEP,
     _SOFT_LIMIT_CEILING,
     _SONG_CUE_TTL_SECONDS,
     _SONG_HOUSEKEEPING_SECONDS,
@@ -218,6 +220,10 @@ class MiMoVoicePlugin(MaiBotPlugin):
         self._song_tool_stamp: Optional[Tuple[int, int]] = None
         # 只在真的命中意图的那一轮把播放工具暴露给模型：session -> 过期时间
         self._intent_armed: Dict[str, float] = {}
+        # 随机点歌（0.7.0 增量）：命中 random_patterns 的轮次，以及各会话最近放过的歌
+        self._random_armed: Dict[str, float] = {}
+        self._random_patterns_cache: Optional[Tuple[Tuple[str, ...], List[Any]]] = None
+        self._sing_recent: Dict[str, deque] = {}
         # 曲库读改写要串行（两个管理员同时 add/set 会互相覆盖）；后台维护任务负责清暂存池与 .trash
         self._songs_lock = asyncio.Lock()
         self._housekeeping_task: Optional[asyncio.Task] = None
@@ -1568,17 +1574,24 @@ class MiMoVoicePlugin(MaiBotPlugin):
         user_id = str(cue.get("user_id") or "")
         if not self._filter_allows(scope, group_id, user_id):
             return None
-        hit = _song_intent.match_intent(str(cue.get("text") or ""), self._intent_patterns())
-        if hit is None:
+        raw_text = str(cue.get("text") or "")
+        hit = _song_intent.match_intent(raw_text, self._intent_patterns())
+        # 「随机来一首」也会被具名正则吃掉「来一首」，但那个关键词只是残句（after=False）；
+        # 这种情况按随机处理，免得把「小鲸鱼，随机」当歌名。
+        random_hit = bool(_song_intent.matches_any(raw_text, self._random_patterns())) and (
+            hit is None or not hit.after
+        )
+        if hit is None and not random_hit:
             return None
+        keyword = hit.keyword if hit is not None else ""
         is_group = scope == "group"
         if is_group and self.config.songs.require_mention and not (cue.get("is_at") or cue.get("is_mentioned")):
             # 命中了但没被 @ / 点名：记一条，方便排查「为什么这条没放歌」
             self.ctx.logger.info(
                 "点歌线索命中但未 @ / 未点名，已拦下（会话 %s，关键词=%r，文本=%r）",
                 session_id,
-                hit.keyword,
-                str(cue.get("text") or "")[:40],
+                keyword if not random_hit else "随机",
+                raw_text[:40],
             )
             return None
         now = time.monotonic()
@@ -1587,12 +1600,16 @@ class MiMoVoicePlugin(MaiBotPlugin):
         songs = self._load_songs()
         if not songs:
             return None
-        matches = _songs.match_songs(songs, hit.keyword) if hit.keyword else []
-        matched_ids = {song.id for song in matches}
-        ordered = list(matches) + [song for song in songs if song.id not in matched_ids]
-        limit = max(1, int(self.config.songs.intent_candidates))
-        candidates = [song.label() for song in ordered[:limit]]
-        note = _song_intent.build_hint(candidates, hit.keyword, limit)
+        candidates: List[str] = []
+        if random_hit:
+            note = _song_intent.build_random_hint()
+        else:
+            matches = _songs.match_songs(songs, keyword) if keyword else []
+            matched_ids = {song.id for song in matches}
+            ordered = list(matches) + [song for song in songs if song.id not in matched_ids]
+            limit = max(1, int(self.config.songs.intent_candidates))
+            candidates = [song.label() for song in ordered[:limit]]
+            note = _song_intent.build_hint(candidates, keyword, limit)
         items = kwargs.get("items")
         if not isinstance(items, list):
             return None
@@ -1607,19 +1624,30 @@ class MiMoVoicePlugin(MaiBotPlugin):
         if not inserted:
             return None
         self._intent_last[session_id] = now
-        self._intent_armed[session_id] = now + _INTENT_ARMED_TTL_SECONDS
+        if random_hit:
+            self._random_armed[session_id] = now + _INTENT_ARMED_TTL_SECONDS
+        else:
+            self._intent_armed[session_id] = now + _INTENT_ARMED_TTL_SECONDS
         self._song_cues.pop(session_id, None)
         if len(self._intent_last) > _TTL_CACHE_MAX_ENTRIES:
             self._intent_last.clear()
         reason = "at" if cue.get("is_at") else ("mentioned" if cue.get("is_mentioned") else "private")
-        self.ctx.logger.info(
-            "已向 planner 注入点歌候选（会话 %s，原因=%s，正则=%r，关键词=%r，候选=%d）",
-            session_id,
-            reason,
-            hit.pattern,
-            hit.keyword,
-            len(candidates),
-        )
+        if random_hit:
+            self.ctx.logger.info(
+                "已向 planner 注入随机点歌提示（会话 %s，原因=%s，曲库=%d 首）",
+                session_id,
+                reason,
+                len(songs),
+            )
+        else:
+            self.ctx.logger.info(
+                "已向 planner 注入点歌候选（会话 %s，原因=%s，正则=%r，关键词=%r，候选=%d）",
+                session_id,
+                reason,
+                hit.pattern if hit is not None else "",
+                keyword,
+                len(candidates),
+            )
         kwargs["items"] = items
         return {"action": "continue", "modified_kwargs": kwargs}
 
@@ -1632,6 +1660,28 @@ class MiMoVoicePlugin(MaiBotPlugin):
             self._intent_armed.pop(session_id, None)
             return False
         return True
+
+    def _song_random_armed(self, session_id: str) -> bool:
+        """这一轮是不是刚由意图层放行过随机点歌（随机播放工具据此可见）。"""
+        if not session_id:
+            return False
+        expires_at = self._random_armed.get(session_id, 0.0)
+        if expires_at <= time.monotonic():
+            self._random_armed.pop(session_id, None)
+            return False
+        return True
+
+    def _random_patterns(self) -> List[Any]:
+        """编译后的随机点歌正则；规则同 ``_intent_patterns``（写错跳过并告警一次）。"""
+        raw = tuple(str(item or "") for item in (self.config.songs.random_patterns or []))
+        cached = self._random_patterns_cache
+        if cached is not None and cached[0] == raw:
+            return cached[1]
+        patterns, warnings = _song_intent.compile_patterns(list(raw))
+        for message in warnings:
+            self._warn_once(f"random-intent:{message}", "%s", message)
+        self._random_patterns_cache = (raw, patterns)
+        return patterns
 
     def _song_tool_ready(self) -> bool:
         """曲库非空才把播放工具暴露给模型；没有歌的时候它只会误导模型。"""
@@ -2042,16 +2092,21 @@ class MiMoVoicePlugin(MaiBotPlugin):
         if not self._filter_allows(scope, group_id or stream_id, user_id):
             await self._command_reply(stream_id, "这个会话不在语音放行名单里。")
             return
-        action, name, field_name, value = _songs.parse_sing(rest)
+        action, name, field_name, extra = _songs.parse_sing(rest)
         admin = _commands.admin_matches(user_id, platform, self.config.commands.admins)
-        if action in ("add", "addforce", "del", "set") and not admin:
-            await self._command_reply(stream_id, "入库、删除、改名只有管理员能用。")
+        needs_admin = action in ("add", "addforce", "del", "set", "send") or (action == "random" and bool(extra))
+        if needs_admin and not admin:
+            await self._command_reply(stream_id, "入库、删除、改名、定向发歌只有管理员能用。")
             return
         songs = self._load_songs()
         if action == "list":
             await self._sing_list(stream_id, songs)
         elif action == "sing":
             await self._sing_play(stream_id, songs, name, user_id)
+        elif action == "random":
+            await self._sing_random(stream_id, songs, user_id, target=extra, platform=platform)
+        elif action == "send":
+            await self._sing_send(stream_id, songs, user_id, platform, extra, name)
         elif action in ("add", "addforce"):
             await self._sing_add(
                 stream_id, songs, name, force=action == "addforce", user_id=user_id, group_id=group_id
@@ -2059,7 +2114,7 @@ class MiMoVoicePlugin(MaiBotPlugin):
         elif action == "del":
             await self._sing_delete(stream_id, songs, name)
         elif action == "set":
-            await self._sing_set(stream_id, songs, name, field_name, value)
+            await self._sing_set(stream_id, songs, name, field_name, extra)
 
     async def _stash_latest_file_from_history(
         self, *, group_id: str, user_id: str, session_id: str
@@ -2187,12 +2242,41 @@ class MiMoVoicePlugin(MaiBotPlugin):
             self._sing_user_last.clear()
         return ""
 
+    async def _deliver_song(self, stream_id: str, song: Any, *, who: str = "本会话") -> Tuple[str, int]:
+        """把一首歌发给指定会话；返回 ``(错误文案, 字节数)``，错误为空串表示成功。"""
+        if not self._session_switch.get(stream_id, True):
+            return f"{who}语音已关闭（/voice on 可恢复）。", 0
+        root = self._songs_root()
+        if root is None:
+            return "找不到插件数据目录，无法读取曲库。", 0
+        path = root / str(song.file)
+        try:
+            audio = await asyncio.to_thread(path.read_bytes)
+        except OSError:
+            return f"「{song.name}」的音频文件不见了，让管理员重新入库。", 0
+        limit = max(1, int(float(self.config.songs.max_file_mb) * 1024 * 1024))
+        if len(audio) > limit:
+            return f"「{song.name}」文件超过 {float(self.config.songs.max_file_mb):.1f} MB 上限。", 0
+        if not await self._send_voice(stream_id, audio):
+            return "语音发送失败，稍后再试。", 0
+        self._remember_played(stream_id, song)
+        return "", len(audio)
+
+    def _remember_played(self, stream_id: str, song: Any) -> None:
+        """记下这个会话最近放过的歌；随机点歌靠它避开刚播过的。"""
+        recent = self._sing_recent.setdefault(stream_id, deque(maxlen=_SING_RECENT_KEEP))
+        with contextlib.suppress(ValueError):
+            recent.remove(song.id)
+        recent.append(song.id)
+        if len(self._sing_recent) > _TTL_CACHE_MAX_ENTRIES:
+            self._sing_recent.clear()
+
+    def _recent_song_ids(self, stream_id: str) -> List[str]:
+        return list(self._sing_recent.get(stream_id, ()))
+
     async def _sing_play(self, stream_id: str, songs: List[Any], query: str, user_id: str) -> None:
         if not query:
             await self._command_reply(stream_id, "点歌要给歌名：/voice sing <歌名/别名/标签>")
-            return
-        if not self._session_switch.get(stream_id, True):
-            await self._command_reply(stream_id, "本会话语音已关闭（/voice on 可恢复）。")
             return
         matches = _songs.match_songs(songs, query)
         if not matches:
@@ -2203,29 +2287,108 @@ class MiMoVoicePlugin(MaiBotPlugin):
             await self._command_reply(stream_id, blocked)
             return
         song = random.choice(matches)
-        root = self._songs_root()
-        if root is None:
-            await self._command_reply(stream_id, "找不到插件数据目录，无法读取曲库。")
-            return
-        path = root / song.file
-        try:
-            audio = path.read_bytes()
-        except OSError:
-            await self._command_reply(stream_id, f"「{song.name}」的音频文件不见了，让管理员重新入库。")
-            return
-        limit = max(1, int(float(self.config.songs.max_file_mb) * 1024 * 1024))
-        if len(audio) > limit:
-            await self._command_reply(stream_id, f"「{song.name}」文件超过 {float(self.config.songs.max_file_mb):.1f} MB 上限。")
-            return
-        if not await self._send_voice(stream_id, audio):
-            await self._command_reply(stream_id, "语音发送失败，稍后再试。")
+        error, size = await self._deliver_song(stream_id, song)
+        if error:
+            await self._command_reply(stream_id, error)
             return
         self.ctx.logger.info(
             "点歌已发送：%s → %s（%s，%.1f MB，命中 %d 条）",
             song.name,
             stream_id,
-            _song_media.duration_label(song.duration_s or len(audio) / 16000.0),
-            len(audio) / 1048576.0,
+            _song_media.duration_label(song.duration_s or size / 16000.0),
+            size / 1048576.0,
+            len(matches),
+        )
+
+    async def _resolve_sing_target(self, stream_id: str, target: str, platform: str) -> Tuple[str, str, str]:
+        """解析 ``send`` / ``random <目标>`` 的目标；返回 ``(stream_id, 中文标签, 错误)``。"""
+        if not target:
+            return stream_id, "本会话", ""
+        kind, ident = _commands.parse_target(target)
+        if not ident:
+            return "", "", "目标写法：g群号 / uQQ号 / QQ号（纯数字先当群、再当私聊）"
+        dest, actual_kind, error = await self._resolve_command_target(kind, ident, platform)
+        if error:
+            return "", "", error
+        if actual_kind == "group":
+            label = f"群 {ident}"
+            allowed = self._filter_allows("group", ident, "")
+        else:
+            label = f"私聊 {ident}"
+            allowed = self._filter_allows("private", "", ident)
+        if not allowed:
+            return "", "", f"{label} 不在语音放行名单里。"
+        return dest, label, ""
+
+    async def _sing_random(
+        self, stream_id: str, songs: List[Any], user_id: str, *, target: str = "", platform: str = "qq"
+    ) -> None:
+        if not songs:
+            await self._command_reply(stream_id, "曲库是空的，先私聊管理员用 /voice sing add <歌名> 入库。")
+            return
+        dest, label, error = await self._resolve_sing_target(stream_id, target, platform)
+        if error:
+            await self._command_reply(stream_id, error)
+            return
+        blocked = self._sing_cooldown(stream_id, user_id)
+        if blocked:
+            await self._command_reply(stream_id, blocked)
+            return
+        recent = self._recent_song_ids(dest)
+        song = _songs.pick_random(songs, recent)
+        if song is None:
+            await self._command_reply(stream_id, "曲库里没有可放的歌。")
+            return
+        degraded = bool(recent) and len(songs) <= _SING_RECENT_KEEP
+        error, size = await self._deliver_song(dest, song, who=label)
+        if error:
+            await self._command_reply(stream_id, error)
+            return
+        if target:
+            await self._command_reply(stream_id, f"已随机发送到{label}：{song.label()}（{size / 1048576.0:.1f} MB）")
+        self.ctx.logger.info(
+            "随机点歌已发送：%s → %s（%s，%.1f MB，避开 %d 首%s）",
+            song.name,
+            dest,
+            _song_media.duration_label(song.duration_s or size / 16000.0),
+            size / 1048576.0,
+            len(recent),
+            "，库太小已退化为全库" if degraded else "",
+        )
+
+    async def _sing_send(
+        self, stream_id: str, songs: List[Any], user_id: str, platform: str, target: str, query: str
+    ) -> None:
+        if not target or not query:
+            await self._command_reply(stream_id, "用法：/voice sing send <目标> <歌名/别名/标签>")
+            return
+        if not songs:
+            await self._command_reply(stream_id, "曲库是空的，先 /voice sing add <歌名> 入库。")
+            return
+        matches = _songs.match_songs(songs, query)
+        if not matches:
+            await self._command_reply(stream_id, f"没有找到「{query}」，/voice sing list 看看有哪些。")
+            return
+        dest, label, error = await self._resolve_sing_target(stream_id, target, platform)
+        if error:
+            await self._command_reply(stream_id, error)
+            return
+        blocked = self._sing_cooldown(stream_id, user_id)
+        if blocked:
+            await self._command_reply(stream_id, blocked)
+            return
+        song = random.choice(matches)
+        error, size = await self._deliver_song(dest, song, who=label)
+        if error:
+            await self._command_reply(stream_id, error)
+            return
+        await self._command_reply(stream_id, f"已发送到{label}：{song.label()}（{size / 1048576.0:.1f} MB）")
+        self.ctx.logger.info(
+            "定向发歌已发送：%s → %s（%s，%.1f MB，命中 %d 条）",
+            song.name,
+            dest,
+            label,
+            size / 1048576.0,
             len(matches),
         )
 
@@ -2692,6 +2855,7 @@ class MiMoVoicePlugin(MaiBotPlugin):
     _TOOL_TEXT_REPLY = "mimo_voice_text_reply"
     _TOOL_VOICE_SAY = "mimo_voice_say"
     _TOOL_PLAY_SONG = "mimo_voice_play_song"
+    _TOOL_PLAY_RANDOM = "mimo_voice_play_random"
 
     @HookHandler(
         "maisaka.planner.before_request",
@@ -2714,8 +2878,11 @@ class MiMoVoicePlugin(MaiBotPlugin):
         hidden = {self._TOOL_TEXT_REPLY, self._TOOL_VOICE_SAY} - allowed
         # 播放工具只在「这一轮刚命中点歌意图」时暴露：曲库为空、或没命中时都给模型看见，
         # 它就会自己找机会放歌（线上确实发生过没点歌也播了一次）。
-        if not self._song_tool_ready() or not self._song_armed(str(kwargs.get("session_id") or "")):
+        session_id = str(kwargs.get("session_id") or "")
+        if not self._song_tool_ready() or not self._song_armed(session_id):
             hidden.add(self._TOOL_PLAY_SONG)
+        if not self._song_tool_ready() or not self._song_random_armed(session_id):
+            hidden.add(self._TOOL_PLAY_RANDOM)
         if not hidden:
             return None
         tools = [definition for definition in tool_definitions if self._tool_definition_name(definition) not in hidden]
@@ -2827,6 +2994,47 @@ class MiMoVoicePlugin(MaiBotPlugin):
             "content": f"已把「{song.name}」作为语音条发出，不必再把歌名念一遍，也不用说自己在唱。",
         }
 
+    @Tool(
+        "mimo_voice_play_random",
+        description=(
+            "从本地曲库随机挑一首歌，直接以语音条发到当前会话。只有当用户明确想随机听一首、"
+            "且本轮提示里要求调用本工具时才调用。"
+        ),
+        visibility="visible",
+        parameters={"type": "object", "properties": {}},
+    )
+    async def play_random(self, **kwargs: Any) -> Dict[str, Any]:
+        """随机点歌的落地点：模型调用后直接发一条语音，不依赖标记文本。"""
+        stream_id = str(kwargs.get("stream_id") or kwargs.get("session_id") or "").strip()
+        if not stream_id:
+            return {"success": False, "content": "无法获取当前会话，直接用文字回复。"}
+        if not self._songs_enabled():
+            return {"success": False, "content": "曲库没开启，直接用文字回复。"}
+        songs = self._load_songs()
+        if not songs:
+            return {"success": False, "content": "曲库是空的，直接告诉对方还没入库任何歌。"}
+        song = _songs.pick_random(songs, self._recent_song_ids(stream_id))
+        if song is None:
+            return {"success": False, "content": "曲库里没有可放的歌，用文字回复。"}
+        cached = self._lookup_scope(stream_id)
+        blocked = self._sing_cooldown(stream_id, str(cached.get("user_id") or ""))
+        if blocked:
+            return {"success": False, "content": f"{blocked}，用文字说明即可。"}
+        error, size = await self._deliver_song(stream_id, song)
+        self._random_armed.pop(stream_id, None)
+        if error:
+            return {"success": False, "content": f"{error} 用文字说明一下。"}
+        self.ctx.logger.info(
+            "意图层随机点歌已发送（会话 %s，歌名=%s，%.1f MB）",
+            stream_id,
+            song.name,
+            size / 1048576.0,
+        )
+        return {
+            "success": True,
+            "content": f"已随机发出「{song.name}」，不必再报歌名，也不用说自己在唱。",
+        }
+
     # ---------------------------------------------------------- 手动命令（0.5.5）
 
     @Command(
@@ -2855,8 +3063,8 @@ class MiMoVoicePlugin(MaiBotPlugin):
         if sub == "sing":
             # 群里只放行 list 和点歌；入库 / 删除 / 改名跟 test、say 一样只限私聊，
             # 不合规时直接落到下面那条「只在私聊里可用」的回执，文案与它们完全一致。
-            action = _songs.parse_sing(rest)[0]
-            if action in ("list", "sing") or not group_id:
+            action, _name, _field, extra = _songs.parse_sing(rest)
+            if action in ("list", "sing") or (action == "random" and not extra) or not group_id:
                 await self._handle_sing_command(stream_id, group_id, user_id, platform, rest)
                 return True, None, 1
 

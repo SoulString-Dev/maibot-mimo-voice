@@ -11,6 +11,8 @@ README 只保留最新一版的要点。
 - **入库流水线不拦截消息**：入站音频走 `chat.receive.after_process` 观察钩子旁路落盘到 `pending/`（不 abort、不改写原文），其他插件仍能拿到原始消息与下载链接；临时池 1 小时过期、总量超 300 MB 按最旧清理，兼作跨插件取音频的共享入口（`pending/index.json`）。
 - **维护命令**：`set <歌名> name/alias/tags <值>`（全量替换，全角/半角逗号、顿号、空格都算分隔符）、`addforce`（覆盖同名）、`del`（只认歌名，文件移到 `songs/.trash/`）。歌名与别名在库内唯一，重名请改用标签。
 - **意图层（不用打命令也能点歌）**：群里被 @ 或点名后说「唱一首雨爱」，插件把曲库候选注入本轮 planner 请求（`maisaka.planner.before_request`），模型判断要播就调用 `mimo_voice_play_song` 工具，语音条由插件直接发出。触发是正则（`songs.intent_patterns`，配置页一行一条，写错的跳过并告警），默认 `(?:唱|来|放|点)一?(?:首|个)`；`require_mention` 默认开（群里必须 @ 或点名，私聊不要求；点名按 `bot.nickname` / `alias_names` + `intent_names` 自己判，因为宿主的 `is_mentioned` 要等 `register_message` 才补）；同会话 30 秒内最多注入一次；上一轮注入的提示会在下次 planner 请求前清掉；播放工具只在该轮命中意图时暴露（曲库为空或没命中都隐藏）。
+- **随机发歌（`/voice sing random`）**：从曲库随机发一首，自动避开本会话最近放过的 3 首；可用歌不够（≤3 首）时退化为全库随机。意图层同步支持：群里被 @ 或点名后说「随机来一首」「随便放一个」也算命中（`songs.random_patterns`），模型调用 `mimo_voice_play_random` 发语音条。随机只支持全库，暂不支持按标签筛。
+- **定向发歌（管理员，仅私聊）**：`/voice sing send <目标> <歌名/别名/标签>` 把指定歌发到群或 QQ（目标写法与 `/voice say` 相同），`/voice sing random <目标>` 随机一首发过去。目标必须在 `filters` 放行名单里且没被 `/voice off` 关；不设「同目标多久只能收一次」的额外限制，冷却只算发起人（30 / 10 秒）。
 - **文件消息补链接**：QQ 私聊文件段只有 `file_id`、没有 url，插件用 `api.call` 调适配器公开的 `message.get_*_msg_history` + `file.get_*_file_url` 自己补下载地址（`songs.lookup_file_url`，默认开）；不需要改适配器。QQ 文件 CDN 只给 http，下载器因此允许 http，但内网/本机地址仍拒绝。
 
 ### 加固
@@ -28,8 +30,8 @@ README 只保留最新一版的要点。
 
 ### 修改
 
-- `plugin.config_version` 升到 0.7.0；`config.example.toml` 新增 `[songs]` 段 20 项（总配置 55 → 75 项）。
-- `/voice` 命令的「仅私聊」规则放开一个例外：`/voice sing` 在群聊里也能用；其余子命令仍是仅私聊、仅管理员。
+- `plugin.config_version` 升到 0.7.0；`config.example.toml` 新增 `[songs]` 段 21 项（总配置 55 → 76 项）。
+- `/voice` 命令的「仅私聊」规则放开一个例外：`/voice sing`（含 `list`、点歌、`random`）在群聊里也能用；入库 / 删除 / 改名 / 定向发歌仍是仅私聊、仅管理员。
 - 新增纯标准库音频探测（`core/song_media.py`）：mp3 逐帧算时长、flac 读 STREAMINFO、wav 用 `wave`，**不依赖 ffmpeg**。
 - 时长探测失败的文件仍然可以入库和播放（发送不依赖时长），清单里显示「时长未知」而不是 `0:00`。
 

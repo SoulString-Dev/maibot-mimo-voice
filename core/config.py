@@ -12,6 +12,7 @@ from pydantic import field_validator, model_validator
 from . import schedule as _schedule
 from .constants import _DEFAULT_API_BASE, DEFAULT_STYLE_INSTRUCTION, PRESET_ALIASES
 from .song_intent import DEFAULT_PATTERNS as _INTENT_DEFAULT_PATTERNS
+from .song_intent import DEFAULT_RANDOM_PATTERNS as _RANDOM_DEFAULT_PATTERNS
 
 _CONFIG_WARNINGS: List[str] = []
 
@@ -497,6 +498,10 @@ class SongsConfig(PluginConfigBase):
     intent_patterns: List[str] = Field(
         default_factory=lambda: list(_INTENT_DEFAULT_PATTERNS),
         description="意图层触发正则（每条一行，Python re 语法）；命中后把候选歌名交给模型挑",
+    )
+    random_patterns: List[str] = Field(
+        default_factory=lambda: list(_RANDOM_DEFAULT_PATTERNS),
+        description="随机点歌的触发正则（每条一行，Python re 语法）；命中后由模型调用随机播放工具",
     )
     intent_names: List[str] = Field(
         default_factory=list,

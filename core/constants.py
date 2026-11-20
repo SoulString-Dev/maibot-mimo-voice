@@ -112,6 +112,9 @@ _INTENT_MIN_INTERVAL_SECONDS = 30.0
 # 命中意图后播放工具的可见窗口（秒）
 _INTENT_ARMED_TTL_SECONDS = 120.0
 
+# 随机点歌时每个会话记住最近几首、用来避开（用户 2026-11-20 定：最近 3 首）
+_SING_RECENT_KEEP = 3
+
 # 唱歌点播的后台维护：多久扫一次暂存池/回收站，回收站里的文件保留多久
 _SONG_HOUSEKEEPING_SECONDS = 600.0
 _SONG_TRASH_TTL_SECONDS = 7 * 86400.0

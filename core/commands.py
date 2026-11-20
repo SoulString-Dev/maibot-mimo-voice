@@ -28,7 +28,7 @@ _USAGE = {
     "status": "/voice status",
     "help": "/voice help",
     "say": "/voice say <群号或QQ号> <文本>",
-    "sing": "/voice sing <歌名/别名/标签>",
+    "sing": "/voice sing <歌名/别名/标签> | list | random | send <目标> <歌名>",
 }
 
 
@@ -138,7 +138,10 @@ def render_help() -> str:
             "唱歌点播（群里也能用）：",
             "/voice sing list                   曲库列表",
             "/voice sing <歌名/别名/标签>        发一首，多首命中随机取一",
+            "/voice sing random                 随机一首（避开本会话最近放过的）",
             "以下仅管理员：",
+            "/voice sing send <目标> <歌名>      把一首歌发到指定群/QQ（私聊，目标同 say）",
+            "/voice sing random <目标>          随机一首发到指定群/QQ（私聊）",
             "/voice sing add <歌名>              把最近 2 分钟内收到的那条音频入库（私聊）",
             "/voice sing addforce <歌名>         同上，但允许覆盖同名",
             "/voice sing del <歌名>              删除（只认歌名，私聊）",
